@@ -1,12 +1,7 @@
+*.spec
 *.exe
-*.log
-*.wav
-*.pth
-*.cache
-*.zip
-#data
-dump
+*.bat
+dist
+exe
 outputs
-release
-__pycache__
-*.lnk
+build
