@@ -81,7 +81,17 @@ Python の拡張機能（`.py`）は、プロセス起動のコストを省く�
 - `acoustic`: `features.npz` が同じ UST・`acoustic`・同じ style_shift のものなら推論を省略します。
 - `acoustic_f0`: `features.npz` が同じ UST・同じ style_shift・同じエディタのピッチ（配列のハッシュ）の `acoustic_f0` のものなら推論を省略し、それ以外は計算して保存します。
 - `pitch`: `pitch_f0.npy` の横に条件を `pitch_f0.json` として保存し、同じ UST・同じ style_shift なら推論を省略します。
+  lf0_model を持つモデルでは、lf0_model の生の出力も `pitch_lf0.npy` に保存し、同じ UST・style_shift の
+  `acoustic` / `acoustic_f0` では lf0_model を実行せずにそれを使います（1回 0.2〜0.6 秒の短縮）。
 - どのキャッシュも、拡散の設定（`config` / 環境変数）が変わったら使いません。
+
+### 乱数のシード
+
+lf0_model の dropout、拡散のノイズ、ボコーダのノイズは乱数です。シードを UST のハッシュと style_shift から
+決めているので、同じフレーズは何度合成し直しても同じ特徴量・同じ波形になります。
+- lf0_model の後でもシードを設定し直すので、「`pitch` → `acoustic`（lf0 を再利用）」と「`acoustic` 単体」の結果は一致します。
+- `synthe` の合成中だけ `torch.use_deterministic_algorithms` を有効にしています。GPU の一部の演算が非決定的なためで、
+  ボコーダが 0.01〜0.03 秒ほど遅くなります（サーバーは起動時に `CUBLAS_WORKSPACE_CONFIG=:4096:8` を設定します）。
 - `synthe`: `features.npz` があれば推論せずに合成します。無ければ `acoustic` を実行してから合成します。
   - **ピッチだけ変えた場合（旧クライアント互換）**: ワークフォルダに `editorf0.npy`（float64、Hz、`(T,)`）を置いて
     `synthe` を呼ぶと、キャッシュ済みの特徴量の lf0 をそのピッチに差し替えて合成します。0 のフレームはモデルのピッチのままです。

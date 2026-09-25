@@ -225,8 +225,13 @@ class ENUNU(SPSVS):
         # self.path_wav = None
 # ↓EnunuServerCustom
         self.multistream_features = None
+        # predict_lf0 で得た lf0_model の生の出力 (正規化済み, パディング込み)。pitch コマンドがキャッシュする
+        self.last_lf0_raw = None
+        # lf0_model の後で乱数を設定し直すシード (lf0 を再利用してもしなくても拡散のノイズを同じにする)
+        self.post_lf0_seed = None
         self.path_f0_npy = None
         self.path_pitch_npy = None
+        self.path_pitch_lf0_npy = None
         self.path_mel_npy = None
         self.path_vuv_npy = None
         self.path_spectrogram_npy = None
@@ -261,6 +266,7 @@ class ENUNU(SPSVS):
         self.path_f0_npy = join(temp_dir, 'f0.npy')
         # pitch コマンドの出力。f0.npy と分けて acoustic のキャッシュ判定に影響させない
         self.path_pitch_npy = join(temp_dir, 'pitch_f0.npy')
+        self.path_pitch_lf0_npy = join(temp_dir, 'pitch_lf0.npy')
         self.path_mel_npy = join(temp_dir, 'mel.npy')
         self.path_vuv_npy = join(temp_dir, 'vuv.npy')
         self.path_spectrogram_npy = join(temp_dir, 'spectrogram.npy')
@@ -419,21 +425,21 @@ class ENUNU(SPSVS):
             )
             return multistream_features
 
-        # ツールが指定されている場合はCSV書き出し
+        # ツールが指定されている場合はCSV書き出し (%.9g: float32 の値は損なわず、%.16f の約半分の時間)
         if feature_type == 'world':
             mgc, lf0, vuv, bap = multistream_features
             f0 = np.exp(lf0)
-            np.savetxt(self.path_mgc, mgc, fmt='%.16f', delimiter=',')
-            np.savetxt(self.path_f0, f0, fmt='%.16f', delimiter=',')
-            np.savetxt(self.path_vuv, vuv, fmt='%.16f', delimiter=',')
-            np.savetxt(self.path_bap, bap, fmt='%.16f', delimiter=',')
+            np.savetxt(self.path_mgc, mgc, fmt='%.9g', delimiter=',')
+            np.savetxt(self.path_f0, f0, fmt='%.9g', delimiter=',')
+            np.savetxt(self.path_vuv, vuv, fmt='%.9g', delimiter=',')
+            np.savetxt(self.path_bap, bap, fmt='%.9g', delimiter=',')
         elif feature_type == 'melf0':
             mgc, lf0, vuv = multistream_features
             f0 = np.exp(lf0)
             # CSV書き出し
-            np.savetxt(self.path_mgc, mgc, fmt='%.16f', delimiter=',')
-            np.savetxt(self.path_f0, f0, fmt='%.16f', delimiter=',')
-            np.savetxt(self.path_vuv, vuv, fmt='%.16f', delimiter=',')
+            np.savetxt(self.path_mgc, mgc, fmt='%.9g', delimiter=',')
+            np.savetxt(self.path_f0, f0, fmt='%.9g', delimiter=',')
+            np.savetxt(self.path_vuv, vuv, fmt='%.9g', delimiter=',')
 
         # 複数ツールのすべてについて処理実施する
         for path_extension in extension_list:
@@ -529,6 +535,7 @@ class ENUNU(SPSVS):
         force_fix_vuv=False,
         fill_silence_to_rest=False,
         editor_f0=None,
+        lf0_base=None,
         **kwargs
     ):
         """Synthesize waveform from HTS labels.
@@ -548,6 +555,8 @@ class ENUNU(SPSVS):
             editor_f0 (ndarray): エディタのピッチ [Hz] (フレーム単位, 0 は指定なし)。
                 指定するとモデルのピッチの代わりにこれを条件にして声色などを生成する。
                 lf0_model を持たないモデルでは無視される。
+            lf0_base (ndarray): pitch コマンドで得た lf0_model の生の出力 (last_lf0_raw)。
+                指定すると lf0_model を実行せずにこれを使う。
         """
         if(self.start_time == None):
             self.start_time = time.time()
@@ -565,13 +574,15 @@ class ENUNU(SPSVS):
         # Predict acoustic features
         # NOTE: if non-zero pre_f0_shift_in_cent is specified, the input pitch
         # will be shifted before running the acoustic model
-        if editor_f0 is not None and self.supports_lf0_conditioning():
-            # 後処理で -style_shift されるので、条件に使うピッチは先に +style_shift しておく
-            editor_lf0 = np.full(len(editor_f0), np.nan)
-            voiced = np.asarray(editor_f0) > 0
-            editor_lf0[voiced] = np.log(np.asarray(editor_f0)[voiced]) \
-                + style_shift * 100 * np.log(2) / 1200
-            with self._override_lf0(editor_lf0):
+        if self.supports_lf0_conditioning():
+            editor_lf0 = None
+            if editor_f0 is not None:
+                # 後処理で -style_shift されるので、条件に使うピッチは先に +style_shift しておく
+                editor_lf0 = np.full(len(editor_f0), np.nan)
+                voiced = np.asarray(editor_f0) > 0
+                editor_lf0[voiced] = np.log(np.asarray(editor_f0)[voiced]) \
+                    + style_shift * 100 * np.log(2) / 1200
+            with self._override_lf0(editor_lf0, lf0_base):
                 acoustic_features = self.predict_acoustic(
                     duration_modified_labels,
                     f0_shift_in_cent=style_shift * 100,
@@ -700,25 +711,46 @@ class ENUNU(SPSVS):
         x, rest = self._acoustic_input(labels, f0_shift_in_cent)
         if hasattr(self.acoustic_model, '_set_lf0_params'):
             self.acoustic_model._set_lf0_params()
+        # 音響モデルの inference (nnsvs の pad_inference) と同じく、reduction_factor の倍数になるよう
+        # 末尾を複製してパディングする (割り切れる場合も reduction_factor 分足す)。
+        # lf0_model は双方向 LSTM なので、パディングが違うと出力も変わり、acoustic で再利用できない
+        rf = getattr(self.acoustic_model, 'reduction_factor', 1)
+        pad = rf - x.shape[1] % rf
+        if pad:
+            x = torch.nn.functional.pad(x, (0, 0, 0, pad), mode='replicate')
         lf0 = self.acoustic_model.lf0_model.inference(x, [x.shape[1]])
-        lf0 = lf0.squeeze(0).cpu().numpy()[: len(rest), 0]
+        self.last_lf0_raw = lf0.squeeze(0).cpu().numpy()[:, 0].copy()
+        lf0 = self.last_lf0_raw[: len(rest)]
         mean, scale = self._lf0_scale()
         return lf0 * scale + mean, rest
 
     @contextmanager
-    def _override_lf0(self, lf0_target):
-        """lf0_model の出力を lf0_target (log-Hz, NaN のフレームはモデルの値のまま) に差し替える。
+    def _override_lf0(self, lf0_target=None, lf0_base=None):
+        """lf0_model の出力を差し替える。
 
+        lf0_target: log-Hz。NaN のフレームはモデル (または lf0_base) の値のまま。
+        lf0_base: 正規化済みの lf0_model の出力 (last_lf0_raw)。長さが合えば lf0_model を実行しない。
         multistream モデルは lf0_model の出力を条件にして mgc/bap/mel/vuv を生成するので、
         この間に predict_acoustic を呼ぶと、指定したピッチに合わせた特徴量が得られる。
         """
         lf0_model = self.acoustic_model.lf0_model
         original = lf0_model.inference
         mean, scale = self._lf0_scale()
-        target = (np.asarray(lf0_target, dtype=np.float64) - mean) / scale
+        target = None
+        if lf0_target is not None:
+            target = (np.asarray(lf0_target, dtype=np.float64) - mean) / scale
 
         def inference(x, lengths=None):
-            pred = original(x, lengths)
+            if lf0_base is not None and len(lf0_base) == x.shape[1]:
+                pred = torch.from_numpy(np.asarray(lf0_base, dtype=np.float32)).to(x.device).view(1, -1, 1)
+            else:
+                if lf0_base is not None:
+                    logger.warning('cached lf0 length %d != %d, running lf0_model', len(lf0_base), x.shape[1])
+                pred = original(x, lengths)
+            if self.post_lf0_seed is not None:
+                torch.manual_seed(self.post_lf0_seed)
+            if target is None:
+                return pred
             # 入力は reduction_factor の倍数にパディングされているので長さを合わせる
             t = np.full(pred.shape[1], np.nan)
             n = min(len(t), len(target))
@@ -1229,7 +1261,7 @@ def run_timing(engine: ENUNU,step=None):
             f.write(str(nnsvs.io.hts.full_to_mono(duration_modified_labels)))
         duration_modified_labels = engine.edit_timing(duration_modified_labels,"timing_editor_2")
 
-def run_acoustic(engine: ENUNU,kind='linear',editor_f0=None,style_shift=0):
+def run_acoustic(engine: ENUNU,kind='linear',editor_f0=None,style_shift=0,lf0_base=None):
     engine.svs_acoustic(
             dtype=np.float32,
             vocoder_type='auto',
@@ -1239,6 +1271,7 @@ def run_acoustic(engine: ENUNU,kind='linear',editor_f0=None,style_shift=0):
             kind=kind,
             editor_f0=editor_f0,
             style_shift=style_shift,
+            lf0_base=lf0_base,
         )
 
 def run_pitch(engine: ENUNU,style_shift=0):
@@ -1274,42 +1307,16 @@ def run_synthesizer(out_wav_path: str,engine: ENUNU):
     wav_data = adjust_wav_gain_for_float32(wav_data)
     wavfile.write(out_wav_path, rate=sample_rate, data=wav_data)
 
-def setup(path_plugin: str):
-    # 引用符を削除
-    path_plugin = path_plugin.strip('"\'')
-    # USTの形式のファイルでなければエラー
-    if not path_plugin.endswith('.tmp') or path_plugin.endswith('.ust'):
-        raise ValueError('Input file must be UST or TMP(plugin).')
-    # UTAUの一時ファイルに書いてある設定を読み取る
-    logging.info('reading settings in TMP')
-    path_ust, voice_dir, _ = get_project_path(path_plugin)
-
-    # 日付時刻を取得
-    str_now = datetime.now().strftime('%Y%m%d_%H%M%S')
-
-    # 入出力パスを設定する
-    if path_ust is not None:
-        songname = splitext(basename(path_ust))[0]
-        out_dir = dirname(path_ust)
-        temp_dir = join(out_dir, f'{songname}_enutemp')
-    # WAV出力パス指定なしかつUST未保存の場合
-    else:
-        logging.info('USTが保存されていないのでデスクトップにWAV出力します。')
-        songname = f'temp__{str_now}'
-        out_dir = mkdtemp(prefix='enunu-')
-        temp_dir = join(out_dir, f'{songname}_enutemp')
-
-    makedirs(temp_dir, exist_ok=True)
-
-    ## NNSVS / ENUNU モデルを探す
+def find_model_dir(voice_dir: str) -> str:
+    """音源フォルダから NNSVS / ENUNU モデルのフォルダを探す。旧形式 (enuconfig.yaml) は変換する。"""
     # model フォルダ
     if packed_model_exists(join(voice_dir, 'model')):
-        model_dir = join(voice_dir, 'model')
+        return join(voice_dir, 'model')
     # 直置き
-    elif packed_model_exists(voice_dir):
-        model_dir = voice_dir
+    if packed_model_exists(voice_dir):
+        return voice_dir
     # ENUNU<1.0.0 向けのディレクトリ構成
-    elif exists(join(voice_dir, 'enuconfig.yaml')):
+    if exists(join(voice_dir, 'enuconfig.yaml')):
         logger.info('Regacy ENUNU model is selected. Converting it for the compatibility...')
         model_dir = join(voice_dir, 'model')
         makedirs(model_dir, exist_ok=True)
@@ -1317,18 +1324,48 @@ def setup(path_plugin: str):
         wrapped_enunu2nnsvs(voice_dir, model_dir)
         print('\n----------------------------------------------')
         logger.info('Converted.')
+        return model_dir
+    # configファイルがなければ例外処理
+    raise Exception('UTAU音源選択でENUNU用モデルを指定してください。')
 
-    # configファイルがあるか調べて、なければ例外処理
+
+def prepare_work_dir(path_plugin: str):
+    """サーバー用: TMP を検証し、音源フォルダとワークフォルダ (<UST名>_enutemp) を返す。
+
+    Returns:
+        (str, str, str): 引用符を除いた TMP のパス, 音源フォルダ, ワークフォルダ
+    """
+    # 引用符を削除
+    path_plugin = path_plugin.strip('"\'')
+    # USTの形式のファイルでなければエラー
+    if not (path_plugin.endswith('.tmp') or path_plugin.endswith('.ust')):
+        raise ValueError('Input file must be UST or TMP(plugin).')
+    # UTAUの一時ファイルに書いてある設定を読み取る
+    logging.info('reading settings in TMP')
+    path_ust, voice_dir, _ = get_project_path(path_plugin)
+    # 入出力パスを設定する
+    if path_ust is not None:
+        songname = splitext(basename(path_ust))[0]
+        temp_dir = join(dirname(path_ust), f'{songname}_enutemp')
+    # UST未保存の場合
     else:
-        raise Exception('UTAU音源選択でENUNU用モデルを指定してください。')
-    assert model_dir
+        logging.info('USTが保存されていないので一時フォルダに出力します。')
+        songname = f'temp__{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+        temp_dir = join(mkdtemp(prefix='enunu-'), f'{songname}_enutemp')
+    makedirs(temp_dir, exist_ok=True)
+    return path_plugin, voice_dir, temp_dir
+
+
+def setup(path_plugin: str):
+    """サーバー用: 音源のモデルを読み込み、path_plugin のワークフォルダを設定したエンジンを返す。"""
+    path_plugin, voice_dir, _ = prepare_work_dir(path_plugin)
+    model_dir = find_model_dir(voice_dir)
 
     # カレントディレクトリを音源フォルダに変更する
     chdir(voice_dir)
     # モデルを読み取る
     logging.info('Loading models')
     engine = ENUNU(model_dir, device='cuda' if torch.cuda.is_available() else 'cpu')
-    engine.set_paths(temp_dir=temp_dir)
 
     # NOTE: 後方互換のため
     # enuconfigが存在する場合、そこに記載されている拡張機能のパスをconfigに追加する
@@ -1338,59 +1375,21 @@ def setup(path_plugin: str):
         engine.config['extensions'] = enuconfig.get('extensions')
         del enuconfig
 
-    # USTを一時フォルダに複製
-    logger.info(f'{datetime.now()} : copying UST')
-    if engine.path_ust is not None:
-        shutil.copy2(path_plugin, engine.path_ust)
-    else:
-        raise ValueError("Engine path_ust is None")
-    # Tableファイルを一時フォルダに複製
     # Tableファイルの場所はモデルの場所から探す
     logger.info(f'{datetime.now()} : copying Table')
-    if engine.path_table is None:
-        # shutil.copy2(find_table(model_dir), engine.path_table)
-        engine.path_table = find_table(model_dir)
-    else:
-        raise ValueError("Engine path_table is None")
+    engine.path_table = find_table(model_dir)
 
+    update_path(path_plugin, engine)
     return engine
 
+
 def update_path(path_plugin: str,engine: ENUNU):
-    # 引用符を削除
-    path_plugin = path_plugin.strip('"\'')
-    # USTの形式のファイルでなければエラー
-    if not path_plugin.endswith('.tmp') or path_plugin.endswith('.ust'):
-        raise ValueError('Input file must be UST or TMP(plugin).')
-    # UTAUの一時ファイルに書いてある設定を読み取る
-    logging.info('reading settings in TMP')
-    path_ust, voice_dir, _ = get_project_path(path_plugin)
-
-    # 日付時刻を取得
-    str_now = datetime.now().strftime('%Y%m%d_%H%M%S')
-
-    # 入出力パスを設定する
-    if path_ust is not None:
-        songname = splitext(basename(path_ust))[0]
-        out_dir = dirname(path_ust)
-        temp_dir = join(out_dir, f'{songname}_enutemp')
-    # WAV出力パス指定なしかつUST未保存の場合
-    else:
-        logging.info('USTが保存されていないのでデスクトップにWAV出力します。')
-        songname = f'temp__{str_now}'
-        out_dir = mkdtemp(prefix='enunu-')
-        temp_dir = join(out_dir, f'{songname}_enutemp')
-
-    makedirs(temp_dir, exist_ok=True)
-
+    """サーバー用: リクエストごとに、エンジンの入出力先を path_plugin のワークフォルダに切り替えて UST を複製する。"""
+    path_plugin, _, temp_dir = prepare_work_dir(path_plugin)
     engine.set_paths(temp_dir=temp_dir, path_feedback=path_plugin)
-    
     # USTを一時フォルダに複製
     logger.info(f'{datetime.now()} : copying UST')
-    if engine.path_ust is not None:
-        shutil.copy2(path_plugin, engine.path_ust)
-    else:
-        raise ValueError("Engine path_ust is None")
-
+    shutil.copy2(path_plugin, engine.path_ust)
     return temp_dir
 
 
@@ -1444,26 +1443,7 @@ def main(path_plugin: str, path_wav: str | None = None, play_wav: bool = False) 
         path_wav = abspath(path_wav)
 
     ## NNSVS / ENUNU モデルを探す
-    # model フォルダ
-    if packed_model_exists(join(voice_dir, 'model')):
-        model_dir = join(voice_dir, 'model')
-    # 直置き
-    elif packed_model_exists(voice_dir):
-        model_dir = voice_dir
-    # ENUNU<1.0.0 向けのディレクトリ構成
-    elif exists(join(voice_dir, 'enuconfig.yaml')):
-        logger.info('Regacy ENUNU model is selected. Converting it for the compatibility...')
-        model_dir = join(voice_dir, 'model')
-        makedirs(model_dir, exist_ok=True)
-        print('----------------------------------------------')
-        wrapped_enunu2nnsvs(voice_dir, model_dir)
-        print('\n----------------------------------------------')
-        logger.info('Converted.')
-
-    # configファイルがあるか調べて、なければ例外処理
-    else:
-        raise Exception('UTAU音源選択でENUNU用モデルを指定してください。')
-    assert model_dir
+    model_dir = find_model_dir(voice_dir)
 
     # カレントディレクトリを音源フォルダに変更する
     chdir(voice_dir)

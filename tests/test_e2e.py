@@ -172,6 +172,53 @@ class ServerE2EBase:
             self.request('acoustic', self.tmp_a)
             self.assertEqual(c.acoustic, n + 2)    # acoustic_f0 の結果は acoustic のキャッシュにならない
 
+    def clear_work_caches(self):
+        for path in (self.engine.path_features_npz, self.engine.path_pitch_npy, self.engine.path_pitch_lf0_npy,
+                     S.pitch_meta_path(self.engine)):
+            if os.path.isfile(path):
+                os.remove(path)
+        self.engine.multistream_features = None
+
+    def test_reproducible_with_fixed_seed(self):
+        self.request('acoustic', self.tmp_a)
+        first = [np.array(f) for f in self.engine.multistream_features]
+        wav1 = self.request('synthe', self.tmp_a)
+        self.clear_work_caches()
+        with Counter() as c:
+            self.request('acoustic', self.tmp_a)
+            self.assertEqual(c.acoustic, 1)
+        second = self.engine.multistream_features
+        for a, b in zip(first, second):
+            np.testing.assert_array_equal(a, np.asarray(b))
+        wav2 = self.request('synthe', self.tmp_a)
+        from scipy.io import wavfile
+        np.testing.assert_array_equal(wavfile.read(wav1)[1], wavfile.read(wav2)[1])
+
+    def test_acoustic_reuses_lf0_from_pitch(self):
+        if not self.engine.supports_lf0_conditioning():
+            self.skipTest('lf0_model を持つモデルのみ')
+        lf0_cls = type(self.engine.acoustic_model.lf0_model)
+        calls = []
+        orig = lf0_cls.inference
+
+        def counting(model, *a, **k):
+            calls.append(1)
+            return orig(model, *a, **k)
+        with mock.patch.object(lf0_cls, 'inference', counting):
+            self.request('acoustic', self.tmp_a)            # acoustic 単体
+            alone = [np.array(f) for f in self.engine.multistream_features]
+            self.assertEqual(len(calls), 1)
+            self.clear_work_caches()
+            self.request('pitch', self.tmp_a)               # pitch → acoustic
+            self.request('acoustic', self.tmp_a)
+            self.assertEqual(len(calls), 2)                 # acoustic では lf0_model を実行しない
+            after_pitch = self.engine.multistream_features
+            f0 = np.load(self.engine.path_f0_npy)
+            self.request('acoustic_f0', self.tmp_a, f0)     # acoustic_f0 でも実行しない
+            self.assertEqual(len(calls), 2)
+        # lf0 を使い回しても、シード固定により acoustic 単体と同じ結果になる
+        self.assertTrue(all(np.array_equal(a, np.asarray(b)) for a, b in zip(alone, after_pitch)))
+
     def test_legacy_melf0_workfolder(self):
         if self.engine.feature_type != 'melf0':
             self.skipTest('melf0 モデルのみ')

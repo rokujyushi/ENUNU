@@ -6,6 +6,7 @@ import gc
 import hashlib
 import json
 import os
+import random
 import subprocess
 import sys
 import time
@@ -13,6 +14,8 @@ import traceback
 from datetime import datetime
 
 sys.path.append(os.path.dirname(__file__))
+# ボコーダを決定的に動かすため (synthe 参照)。CUDA の初期化より前に設定する必要がある
+os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
 import numpy as np
 import torch
 import enunu
@@ -68,6 +71,39 @@ def features_meta(engine: enunu.ENUNU, kind, style_shift, digest, **extra):
     # 拡散設定が変わったら (環境設定でステップ数を変えた等) キャッシュは使わない
     return {'kind': kind, 'style_shift': style_shift, 'ust': digest,
             'feature_type': engine.feature_type, 'diffusion': enunu.diffusion_settings(), **extra}
+
+def seed_rng(engine: enunu.ENUNU, digest, style_shift=0):
+    """UST のハッシュから乱数のシードを決める。
+
+    lf0_model の dropout・拡散のノイズ・ボコーダのノイズが乱数なので、固定しないと
+    同じフレーズでも合成し直すたびに音が微妙に変わる。
+    lf0_model の後でも設定し直すので、lf0 を再利用してもしなくても結果は同じになる。
+    """
+    seed = int(digest[:8], 16) ^ ((style_shift & 0xff) << 24)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    engine.post_lf0_seed = seed + 1
+    return seed
+
+def pitch_meta_path(engine: enunu.ENUNU):
+    return os.path.splitext(engine.path_pitch_npy)[0] + '.json'
+
+def pitch_cache_valid(engine: enunu.ENUNU, meta):
+    try:
+        with open(pitch_meta_path(engine), encoding='utf-8') as f:
+            return json.load(f) == meta
+    except (OSError, ValueError):
+        return False
+
+def cached_pitch_lf0(engine: enunu.ENUNU, digest, style_shift):
+    """同じ UST・style_shift の pitch で保存した lf0_model の出力があれば返す (acoustic で lf0_model を省く)。"""
+    if not engine.supports_lf0_conditioning() or not os.path.isfile(engine.path_pitch_lf0_npy):
+        return None
+    if not pitch_cache_valid(engine, features_meta(engine, 'pitch', style_shift, digest)):
+        return None
+    print('reuse lf0 from pitch')
+    return np.load(engine.path_pitch_lf0_npy)
 
 def array_digest(array):
     return hashlib.sha1(np.ascontiguousarray(array, dtype=np.float64).tobytes()).hexdigest()
@@ -184,21 +220,21 @@ def pitch(engine: enunu.ENUNU, style_shift=0):
     print('pitch: start')
     digest = ust_digest(engine)
     # pitch_f0.npy の横に、作った条件を pitch_f0.json として残す
-    path_meta = os.path.splitext(engine.path_pitch_npy)[0] + '.json'
     meta = features_meta(engine, 'pitch', style_shift, digest)
-    f0 = None
-    if os.path.isfile(engine.path_pitch_npy) and os.path.isfile(path_meta):
-        try:
-            with open(path_meta, encoding='utf-8') as f:
-                if json.load(f) == meta:
-                    f0 = np.load(engine.path_pitch_npy)
-                    print('pitch: use cached pitch_f0.npy')
-        except Exception as e:
-            print(f'pitch: ignore broken cache ({e})')
-    if f0 is None:
+    if os.path.isfile(engine.path_pitch_npy) and pitch_cache_valid(engine, meta):
+        print('pitch: use cached pitch_f0.npy')
+        f0 = np.load(engine.path_pitch_npy)
+    else:
         enunu.run_timing(engine=engine,step='acoustic')
+        seed_rng(engine, digest, style_shift)
+        engine.last_lf0_raw = None
         f0 = enunu.run_pitch(engine=engine,style_shift=style_shift)
-        with open(path_meta, 'w', encoding='utf-8') as f:
+        # lf0_model の生の出力も残し、同じ UST の acoustic / acoustic_f0 で使い回す
+        if engine.last_lf0_raw is not None:
+            np.save(engine.path_pitch_lf0_npy, engine.last_lf0_raw)
+        elif os.path.isfile(engine.path_pitch_lf0_npy):
+            os.remove(engine.path_pitch_lf0_npy)
+        with open(pitch_meta_path(engine), 'w', encoding='utf-8') as f:
             json.dump(meta, f)
     print('pitch: end')
     return {
@@ -226,7 +262,9 @@ def acoustic_f0(engine: enunu.ENUNU, editor_f0: np.ndarray, style_shift=0):
         engine.multistream_features = features
     else:
         enunu.run_timing(engine=engine,step='acoustic')
-        enunu.run_acoustic(engine=engine,editor_f0=editor_f0,style_shift=style_shift)
+        seed_rng(engine, digest, style_shift)
+        enunu.run_acoustic(engine=engine,editor_f0=editor_f0,style_shift=style_shift,
+                           lf0_base=cached_pitch_lf0(engine, digest, style_shift))
         enunu.run_npy(engine=engine)
         save_features(engine, 'acoustic_f0', style_shift, digest, editor_f0=f0_digest)
     print('acoustic_f0: end')
@@ -257,7 +295,16 @@ def synthe(out_wav_path: str,engine: enunu.ENUNU, style_shift=0):
         run_acoustic_pipeline(engine, style_shift, digest)
         features = engine.multistream_features
     engine.multistream_features = apply_editor_f0(engine, features)
-    enunu.run_synthesizer(out_wav_path=out_wav_path,engine=engine)
+    seed_rng(engine, digest, style_shift)
+    # シードを固定しても GPU の一部の演算が非決定的で波形がわずかに変わるので、合成中だけ決定的な実装を使う
+    # (ボコーダが 0.01〜0.03 秒ほど遅くなる。音響モデルはこれが無くても一致する)
+    was_deterministic = torch.are_deterministic_algorithms_enabled()
+    was_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    try:
+        enunu.run_synthesizer(out_wav_path=out_wav_path,engine=engine)
+    finally:
+        torch.use_deterministic_algorithms(was_deterministic, warn_only=was_warn_only)
     print('synthe: end')
     return {
         'path_wav': out_wav_path,
@@ -265,7 +312,9 @@ def synthe(out_wav_path: str,engine: enunu.ENUNU, style_shift=0):
 
 def run_acoustic_pipeline(engine: enunu.ENUNU, style_shift, digest):
     enunu.run_timing(engine=engine,step='acoustic')
-    enunu.run_acoustic(engine=engine,style_shift=style_shift)
+    seed_rng(engine, digest, style_shift)
+    enunu.run_acoustic(engine=engine,style_shift=style_shift,
+                       lf0_base=cached_pitch_lf0(engine, digest, style_shift))
     enunu.run_npy(engine=engine)
     save_features(engine, 'acoustic', style_shift, digest)
 
