@@ -74,16 +74,14 @@ def pitch(engine: enunu.ENUNU):
         'lf0_conditioning': engine.supports_lf0_conditioning(),
     }
 
-def acoustic_f0(engine: enunu.ENUNU):
-    """クライアントが書いた editorf0.npy のピッチを条件にして音響特徴量を作り直す。
+def acoustic_f0(engine: enunu.ENUNU, editor_f0: np.ndarray):
+    """エディタのピッチを条件にして音響特徴量を作り直す。
 
+    editor_f0: float64 配列 (Hz)。0 のフレームはモデル自身のピッチを使う。
     lf0_model を持たないモデルでは通常の acoustic と同じ結果になる。
-    出力は acoustic と同じ (f0.npy は editorf0 のピッチになる)。
+    出力は acoustic と同じ (f0.npy は editor_f0 のピッチになる)。
     """
     print('acoustic_f0: start')
-    if not (engine.path_editorf0_npy and os.path.exists(engine.path_editorf0_npy)):
-        raise FileNotFoundError(f'`{engine.path_editorf0_npy}` does not exist.')
-    editor_f0 = np.load(engine.path_editorf0_npy).flatten()
     enunu.run_timing(engine=engine,step='acoustic')
     enunu.run_acoustic(engine=engine,editor_f0=editor_f0)
     enunu.run_npy(engine=engine)
@@ -107,29 +105,7 @@ def synthe(out_wav_path: str,engine: enunu.ENUNU):
     }
 
 def set_features(engine: enunu.ENUNU):
-    if (engine.path_editorf0_npy and os.path.exists(engine.path_editorf0_npy)) or (engine.path_mel_npy and os.path.exists(engine.path_mel_npy)) or (engine.path_vuv_npy and os.path.exists(engine.path_vuv_npy)):
-        print('set_features: update features')
-        f0 = np.load(engine.path_editorf0_npy)
-        f0 = np.array(f0).reshape(-1, 1)
-        lf0 = f0.copy()
-        lf0[np.nonzero(f0)] = np.log(f0[np.nonzero(f0)])
-        mel = np.load(engine.path_mel_npy)
-        vuv = np.load(engine.path_vuv_npy)
-        # リストをタプルに戻す
-        engine.multistream_features = (mel, lf0, vuv)
-        return True
-    elif (engine.path_f0_npy and os.path.exists(engine.path_f0_npy)) or (engine.path_mel_npy and os.path.exists(engine.path_mel_npy)) or (engine.path_vuv_npy and os.path.exists(engine.path_vuv_npy)):
-        print('set_features: update features')
-        f0 = np.load(engine.path_f0_npy)
-        f0 = np.array(f0).reshape(-1, 1)
-        lf0 = f0.copy()
-        lf0[np.nonzero(f0)] = np.log(f0[np.nonzero(f0)])
-        mel = np.load(engine.path_mel_npy)
-        vuv = np.load(engine.path_vuv_npy)
-        # 要素を代入
-        engine.multistream_features = (mel, lf0, vuv)
-        return True
-    return False
+    return engine.multistream_features is not None
 
 def poll_socket(socket, timetick = 100):
     poller = zmq.Poller()
@@ -192,7 +168,8 @@ def main():
                 elif request[0] == 'pitch':
                     response['result'] = pitch(engine)
                 elif request[0] == 'acoustic_f0':
-                    response['result'] = acoustic_f0(engine)
+                    editor_f0 = np.asarray(request[5], dtype=np.float64)
+                    response['result'] = acoustic_f0(engine, editor_f0)
                 elif request[0] == 'synthe':
                     response['result'] = synthe(request[2],engine)
                 else:

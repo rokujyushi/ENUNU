@@ -29,12 +29,14 @@
 
 ## `acoustic_f0` — エディタのピッチを条件にして音響特徴量を作り直す
 
-先にクライアントが `<enutemp>/editorf0.npy` を書き込んでおきます。
-（float64、形状 `(T,)`、単位は Hz。0 のフレームはモデル自身のピッチを使います。）
+エディタの F0 配列をリクエストに直接埋め込みます（ファイル経由不要）。
 
 ```json
-["acoustic_f0", "<cache>/enu-xxxx.tmp", "", "<voicebankNameHash>", "600"]
+["acoustic_f0", "<cache>/enu-xxxx.tmp", "", "<voicebankNameHash>", "600", [0.0, 220.5, 220.5, ...]]
 ```
+
+- `request[5]`: float64 配列 (Hz)、形状 `(T,)`。0 のフレームはモデル自身のピッチを使います。
+  フレーム数は `pitch` コマンドの `pitch_f0.npy` の長さと一致させてください。
 
 レスポンス: `acoustic` と同じ項目に `lf0_conditioning` が加わります。
 
@@ -51,8 +53,9 @@
 ## 想定しているクライアントの流れ（EnunuRenderer）
 
 1. `pitch` → `pitch_f0.npy`。フレーム数を得るのと、描画用ピッチ（LoadRenderedPitch）に使います。
-2. フレーム数 = `len(pitch_f0)` として editorF0 を作り、`editorf0.npy` に保存します。
-3. `acoustic_f0` → f0 / sp / ap（WORLD）または mel / vuv（melf0）を受け取ります。
+2. フレーム数 = `len(pitch_f0)` として editorF0 配列を作ります。
+3. `["acoustic_f0", ..., editorF0.ToList()]` — f0 配列をリクエスト `[5]` に直接埋め込んで送信します。
+   → f0 / sp / ap（WORLD）または mel / vuv（melf0）を受け取ります。
 4. これまでどおり WORLD 合成、または `synthe` を呼びます。
 
 ## 動作確認（2026-09-25、RTX 5060 Ti、8 秒のフレーズ）

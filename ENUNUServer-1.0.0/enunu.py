@@ -17,6 +17,7 @@ import tkinter
 from argparse import ArgumentParser
 from datetime import datetime
 from glob import glob
+import os
 from os import chdir, listdir, makedirs, rename, startfile, remove
 from os.path import (
     abspath,
@@ -224,7 +225,6 @@ class ENUNU(SPSVS):
 # ↓EnunuServerCustom
         self.multistream_features = None
         self.path_f0_npy = None
-        self.path_editorf0_npy = None
         self.path_pitch_npy = None
         self.path_mel_npy = None
         self.path_vuv_npy = None
@@ -232,6 +232,17 @@ class ENUNU(SPSVS):
         self.path_aperiodicity_npy = None
         self.path_question = None
         self.start_time = None
+        # PNDM 拡散スピードアップ (bap: デフォルト 10倍速)
+        # ENUNU_DIFFUSION_SPEEDUP=N で bap の拡散ステップを 1/N に削減。
+        # ENUNU_DIFFUSION_TARGETS=all で mgc にも適用 (プレビュー品質)。
+        # ENUNU_DIFFUSION_METHOD=eta1 でテクスチャを保持した間引き DDPM。
+        speedup_env = os.environ.get("ENUNU_DIFFUSION_SPEEDUP", "10")
+        try:
+            _speedup = int(speedup_env)
+        except ValueError:
+            _speedup = 10
+        if _speedup > 1:
+            self._apply_pndm_speedup(_speedup)
 # ↑EnunuServerCustom
 
 # ↓EnunuServerCustom
@@ -254,7 +265,6 @@ class ENUNU(SPSVS):
             self.path_feedback = path_feedback
 # ↓EnunuServerCustom
         self.path_f0_npy = join(temp_dir, 'f0.npy')
-        self.path_editorf0_npy = join(temp_dir, 'editorf0.npy')
         # pitch コマンドの出力。f0.npy と分けて acoustic のキャッシュ判定に影響させない
         self.path_pitch_npy = join(temp_dir, 'pitch_f0.npy')
         self.path_mel_npy = join(temp_dir, 'mel.npy')
@@ -613,6 +623,43 @@ class ENUNU(SPSVS):
             and hasattr(self.acoustic_model, 'out_lf0_idx')
             and lf0_model.prediction_type() != PredictionType.PROBABILISTIC
         )
+
+    def _apply_pndm_speedup(self, speedup: int) -> None:
+        """acoustic_model 配下の GaussianDiffusion に PLMS/DDIM/eta1 スピードアップを仕掛ける。
+
+        環境変数:
+          ENUNU_DIFFUSION_SPEEDUP  : 間引き倍率 (デフォルト 10)。1 で無効。
+          ENUNU_DIFFUSION_TARGETS  : "bap" (デフォルト) / "all" / "mgc"
+          ENUNU_DIFFUSION_METHOD   : "plms" (デフォルト) / "ddim" / "eta1"
+
+        bap は PLMS 10step でも音質劣化なし (検証済み)。
+        mgc に適用する場合は METHOD=eta1 を推奨。
+        """
+        targets = os.environ.get("ENUNU_DIFFUSION_TARGETS", "bap").lower()
+        method = os.environ.get("ENUNU_DIFFUSION_METHOD", "plms").lower()
+        try:
+            from nnsvs.diffsinger.diffusion import GaussianDiffusion, extract
+        except Exception as e:
+            logger.warning("GaussianDiffusion を import できず speedup 無効: %s", e)
+            return
+        patched_names: list = []
+        for name, m in self.acoustic_model.named_modules():
+            if not isinstance(m, GaussianDiffusion):
+                continue
+            short = name.split(".")[-1] if name else "(root)"
+            if not (targets == "all" or targets in short):
+                continue
+            m.pndm_speedup = speedup
+            if method == "ddim":
+                _bind_ddim_sampler(m, extract)
+            elif method == "eta1":
+                _bind_eta1_sampler(m, extract)
+            patched_names.append(short)
+        if patched_names:
+            logger.info("拡散サンプラ=%s speedup=%dx を %s に適用 (targets=%s)",
+                        method, speedup, patched_names, targets)
+        else:
+            logger.info("拡散モデルなし or targets=%s に一致せず、speedup 適用なし", targets)
 
     def _acoustic_input(self, labels, f0_shift_in_cent=0):
         """音響モデルへの入力 (正規化済みの楽譜特徴量) と休符フレームのマスクを作る。
@@ -993,6 +1040,61 @@ class ENUNU(SPSVS):
         return wav, self.sample_rate
 
 # ↓EnunuServerCustom
+
+def _bind_ddim_sampler(gauss_diffusion, extract_fn) -> None:
+    """GaussianDiffusion の p_sample_plms を DDIM (η=0) に置き換える。"""
+    import types
+
+    @torch.no_grad()
+    def ddim_step(self, x, t, interval, cond):
+        a_t = extract_fn(self.alphas_cumprod, t, x.shape)
+        a_prev = extract_fn(
+            self.alphas_cumprod,
+            torch.max(t - interval, torch.zeros_like(t)),
+            x.shape,
+        )
+        sqrt_a_t = a_t.sqrt()
+        sqrt_one_minus_a_t = (1 - a_t).sqrt()
+        sqrt_a_prev = a_prev.sqrt()
+        sqrt_one_minus_a_prev = (1 - a_prev).sqrt()
+        noise_pred = self.denoise_fn(x, t, cond=cond)
+        x0_hat = (x - sqrt_one_minus_a_t * noise_pred) / sqrt_a_t
+        x0_hat = x0_hat.clamp(-1.0, 1.0)
+        if bool((t == 0).all()):
+            return x0_hat
+        eps_eff = (x - sqrt_a_t * x0_hat) / sqrt_one_minus_a_t.clamp(min=1e-8)
+        return sqrt_a_prev * x0_hat + sqrt_one_minus_a_prev * eps_eff
+
+    gauss_diffusion.p_sample_plms = types.MethodType(ddim_step, gauss_diffusion)
+
+
+def _bind_eta1_sampler(gauss_diffusion, extract_fn) -> None:
+    """GaussianDiffusion の p_sample_plms を η=1 strided ancestral に置き換える。"""
+    import types
+
+    @torch.no_grad()
+    def eta1_step(self, x, t, interval, cond):
+        t_prev = torch.max(t - interval, torch.zeros_like(t))
+        a_t = extract_fn(self.alphas_cumprod, t, x.shape)
+        a_prev = extract_fn(self.alphas_cumprod, t_prev, x.shape)
+        sqrt_a_t = a_t.sqrt()
+        sqrt_one_minus_a_t = (1 - a_t).sqrt().clamp(min=1e-8)
+        noise_pred = self.denoise_fn(x, t, cond=cond)
+        x0_hat = ((x - sqrt_one_minus_a_t * noise_pred) / sqrt_a_t).clamp(-1.0, 1.0)
+        if bool((t == 0).all()):
+            return x0_hat
+        eps_eff = (x - sqrt_a_t * x0_hat) / sqrt_one_minus_a_t
+        sigma2 = ((1 - a_prev) / (1 - a_t)).clamp(min=0.0) \
+            * (1 - a_t / a_prev).clamp(min=0.0)
+        dir_coef = (1 - a_prev - sigma2).clamp(min=0.0).sqrt()
+        return (
+            a_prev.sqrt() * x0_hat
+            + dir_coef * eps_eff
+            + sigma2.sqrt() * torch.randn_like(x)
+        )
+
+    gauss_diffusion.p_sample_plms = types.MethodType(eta1_step, gauss_diffusion)
+
 
 def run_timing(engine: ENUNU,step=None):
 
