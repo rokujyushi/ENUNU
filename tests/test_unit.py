@@ -236,6 +236,49 @@ class TestGraphedDenoiser(unittest.TestCase):
         self.assertTrue(graphed(x, t, cond).requires_grad)
 
 
+class TestEditAcousticReload(unittest.TestCase):
+    """edit_acoustic: 拡張機能が書き換えなかった CSV は読み直さず、元の配列 (丸めなし) を使う。"""
+
+    def run_edit(self, script):
+        with tempfile.TemporaryDirectory() as tmp:
+            ext = os.path.join(tmp, 'ext.py')
+            with open(ext, 'w', encoding='utf-8') as f:
+                f.write(script)
+            fake = types.SimpleNamespace(
+                path_mgc=os.path.join(tmp, 'mgc.csv'), path_f0=os.path.join(tmp, 'f0.csv'),
+                path_vuv=os.path.join(tmp, 'vuv.csv'), path_bap=os.path.join(tmp, 'bap.csv'),
+                path_ust=None, path_table=None, path_feedback=None, path_full_score=None,
+                path_mono_score=None, path_full_timing=None, path_mono_timing=None,
+                get_extension_path_list=lambda key: [ext])
+            rng = np.random.default_rng(0)
+            features = (rng.normal(size=(20, 6)), np.log(rng.uniform(100, 400, size=(20, 1))),
+                        rng.uniform(size=(20, 1)), rng.normal(size=(20, 3)))
+            out = enunu.ENUNU.edit_acoustic(fake, features, 'world')
+            self.assertFalse(os.path.exists(fake.path_mgc))   # CSV は後片付けされる
+            return features, out
+
+    def test_only_changed_files_are_reloaded(self):
+        # f0 だけを 2 倍にする拡張機能 (style_shifter と同じく f0 だけを書き換える)
+        features, out = self.run_edit(
+            'import sys, numpy as np\nargs = dict(zip(sys.argv[1::2], sys.argv[2::2]))\n'
+            'f0 = np.loadtxt(args["--f0"], delimiter=",")\nnp.savetxt(args["--f0"], f0 * 2, fmt="%.9g", delimiter=",")\n')
+        np.testing.assert_array_equal(out[0], features[0])          # mgc は元の配列そのもの
+        np.testing.assert_array_equal(out[3], features[3])          # bap も
+        np.testing.assert_allclose(out[1], features[1] + np.log(2), atol=1e-7)   # f0 は読み直し
+
+    def test_unchanged_everything(self):
+        features, out = self.run_edit('pass\n')
+        for a, b in zip(features, out):
+            np.testing.assert_array_equal(a, b)
+
+    def test_changed_mgc_is_reloaded(self):
+        features, out = self.run_edit(
+            'import sys, numpy as np\nargs = dict(zip(sys.argv[1::2], sys.argv[2::2]))\n'
+            'np.savetxt(args["--mgc"], np.zeros((20, 6)), fmt="%.9g", delimiter=",")\n')
+        np.testing.assert_array_equal(out[0], np.zeros((20, 6)))
+        np.testing.assert_array_equal(out[1], features[1])
+
+
 class TestExtensionInProcess(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

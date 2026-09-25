@@ -18,6 +18,7 @@ from argparse import ArgumentParser
 from datetime import datetime
 from glob import glob
 import copy
+import hashlib
 import os
 from os import chdir, listdir, makedirs, rename, startfile, remove
 from os.path import (
@@ -450,6 +451,13 @@ class ENUNU(SPSVS):
             np.savetxt(self.path_f0, f0, fmt='%.9g', delimiter=',')
             np.savetxt(self.path_vuv, vuv, fmt='%.9g', delimiter=',')
 
+        # 書き出した内容のハッシュ (拡張機能が書き換えなかったファイルは読み直さない)
+        def file_digest(path):
+            with open(path, 'rb') as f:
+                return hashlib.sha1(f.read()).digest()
+        written = {path: file_digest(path) for path in (self.path_mgc, self.path_f0, self.path_vuv, self.path_bap)
+                   if exists(path)}
+
         # 複数ツールのすべてについて処理実施する
         for path_extension in extension_list:
             tqdm.write(f'Editing acoustic features with {path_extension}')
@@ -468,19 +476,30 @@ class ENUNU(SPSVS):
                 bap=self.path_bap,
             )
 
-        # 編集が終わったらCSV読み取り
+        # 編集が終わったらCSV読み取り。書き換えられていないものは元の配列をそのまま使う
+        # (CSV を経由した丸めも入らない。多くの拡張機能は f0 だけを書き換える)
+        def reload(path, original):
+            if path in written and exists(path) and file_digest(path) == written[path]:
+                return np.asarray(original, dtype=np.float64)
+            return np.loadtxt(path, delimiter=',', dtype=np.float64)
+
+        def reload_lf0():
+            # f0 は exp(lf0) を書き出しているので、書き換えられていなければ元の lf0 を使う
+            if self.path_f0 in written and exists(self.path_f0) and file_digest(self.path_f0) == written[self.path_f0]:
+                return np.asarray(lf0, dtype=np.float64).reshape(-1, 1)
+            return np.log(np.loadtxt(self.path_f0, delimiter=',', dtype=np.float64)).reshape(-1, 1)
+
         if feature_type == 'world':
-            mgc = np.loadtxt(self.path_mgc, delimiter=',', dtype=np.float64)
-            lf0 = np.log(np.loadtxt(self.path_f0, delimiter=',', dtype=np.float64)).reshape(-1, 1)
-            vuv = np.loadtxt(self.path_vuv, delimiter=',', dtype=np.float64).reshape(-1, 1)
-            bap = np.loadtxt(self.path_bap, delimiter=',', dtype=np.float64)
+            mgc = reload(self.path_mgc, mgc)
+            lf0 = reload_lf0()
+            vuv = reload(self.path_vuv, vuv).reshape(-1, 1)
+            bap = reload(self.path_bap, bap)
             # 統合
             multistream_features = (mgc, lf0, vuv, bap)
         elif feature_type == 'melf0':
-            # 編集が終わったらCSV読み取り
-            mgc = np.loadtxt(self.path_mgc, delimiter=',', dtype=np.float64)
-            lf0 = np.log(np.loadtxt(self.path_f0, delimiter=',', dtype=np.float64)).reshape(-1, 1)
-            vuv = np.loadtxt(self.path_vuv, delimiter=',', dtype=np.float64).reshape(-1, 1)
+            mgc = reload(self.path_mgc, mgc)
+            lf0 = reload_lf0()
+            vuv = reload(self.path_vuv, vuv).reshape(-1, 1)
             # 統合
             multistream_features = (mgc, lf0, vuv)
         else:
@@ -912,11 +931,23 @@ class ENUNU(SPSVS):
         
 
         # Generate waveform by vocoder
-        wav = self.predict_waveform(
-            multistream_features=self.multistream_features,
-            vocoder_type=vocoder_type,
-            vuv_threshold=vuv_threshold,
-        )
+        # ニューラルボコーダは計算量が律速なので fp16 で動かす (HN-uSFGAN で約1.5倍速、fp32 との SNR 54〜60 dB)。
+        # ENUNU_VOCODER_FP16=0 で無効。万一非有限値が出たら fp32 で合成し直す
+        use_fp16 = (torch.device(self.device).type == 'cuda'
+                    and os.environ.get('ENUNU_VOCODER_FP16', '1') != '0')
+        with torch.autocast('cuda', dtype=torch.float16, enabled=use_fp16):
+            wav = self.predict_waveform(
+                multistream_features=self.multistream_features,
+                vocoder_type=vocoder_type,
+                vuv_threshold=vuv_threshold,
+            )
+        if use_fp16 and not np.all(np.isfinite(wav)):
+            logger.warning('fp16 vocoder produced non-finite samples, retrying in fp32')
+            wav = self.predict_waveform(
+                multistream_features=self.multistream_features,
+                vocoder_type=vocoder_type,
+                vuv_threshold=vuv_threshold,
+            )
         # Post-processing for the output waveform
         wav = self.postprocess_waveform(
             wav,
