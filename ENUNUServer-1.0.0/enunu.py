@@ -1455,9 +1455,10 @@ def update_path(path_plugin: str,engine: ENUNU):
     """サーバー用: リクエストごとに、エンジンの入出力先を path_plugin のワークフォルダに切り替えて UST を複製する。"""
     path_plugin, _, temp_dir = prepare_work_dir(path_plugin)
     engine.set_paths(temp_dir=temp_dir, path_feedback=path_plugin)
-    # USTを一時フォルダに複製
-    logger.info(f'{datetime.now()} : copying UST')
-    shutil.copy2(path_plugin, engine.path_ust)
+    # USTを一時フォルダに複製 (ワークフォルダの temp.ust 自身が渡された場合はそのまま使う)
+    if abspath(path_plugin) != abspath(engine.path_ust):
+        logger.info(f'{datetime.now()} : copying UST')
+        shutil.copy2(path_plugin, engine.path_ust)
     return temp_dir
 
 

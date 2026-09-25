@@ -130,5 +130,20 @@ class TestZmqProtocol(unittest.TestCase):
         self.assertEqual(self.server_log().count('Loading models'), loads + 2)
 
 
+    def test_6_synthe_after_tmp_deleted(self):
+        voices = _common.test_voices()
+        if not voices:
+            self.skipTest('テスト用の音源が見つからない')
+        tmp = _common.write_tmp(os.path.join(self.work, 'enu-w.tmp'), voices[-1], _common.PHRASE_A)
+        self.send(['ver_check'])
+        self.assertNotIn('error', self.send(['acoustic', tmp, '', 'W', '600']))
+        os.remove(tmp)   # OpenUtau の「選択ノートのキャッシュ削除」相当
+        # まだ読み込まれていない歌手 (再起動後相当) でも、ワークフォルダの temp.ust から読み込んで合成できる
+        wav = os.path.join(self.work, 'w.wav')
+        res = self.send(['synthe', tmp, wav, 'V', '600'])
+        self.assertNotIn('error', res)
+        self.assertTrue(os.path.getsize(wav) > 1000)
+
+
 if __name__ == '__main__':
     unittest.main()

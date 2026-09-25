@@ -277,19 +277,44 @@ def acoustic_f0(engine: enunu.ENUNU, editor_f0: np.ndarray, style_shift=0):
         'lf0_conditioning': engine.supports_lf0_conditioning(),
     }
 
-def synthe(out_wav_path: str,engine: enunu.ENUNU, style_shift=0):
+def resolve_plugin_path(request):
+    """リクエストの TMP のパスと、TMP が無いときにキャッシュだけで合成するかどうかを返す。
+
+    OpenUtau の「選択ノートのキャッシュ削除」は Cache 直下の enu-*.tmp を消すが _enutemp は残すので、
+    その後の synthe では TMP が無い。この場合はワークフォルダに残っている temp.ust を代わりに使い、
+    features.npz から合成する (temp.ust は拡張機能で編集済みなので UST ハッシュは照合しない)。
+    """
+    path_plugin = request[1].strip('"\'')
+    if request[0] != 'synthe' or os.path.isfile(path_plugin):
+        return path_plugin, False
+    saved_ust = os.path.join(os.path.splitext(path_plugin)[0] + '_enutemp', 'temp.ust')
+    if not os.path.isfile(saved_ust):
+        raise FileNotFoundError(f'{path_plugin} and its work folder do not exist')
+    print(f'synthe: {os.path.basename(path_plugin)} is missing, using cached features in the work folder')
+    return saved_ust, True
+
+def synthe(out_wav_path: str,engine: enunu.ENUNU, style_shift=0, cache_only=False):
     """ワークフォルダのキャッシュ (features.npz) から波形を合成する。
 
     キャッシュがあれば推論せず、editorf0.npy があればピッチだけ差し替える。
     style_shift はキャッシュが無く acoustic から作り直すときだけ使う。
+    cache_only: TMP が無い場合 (resolve_plugin_path 参照)。UST を照合せずキャッシュを使い、無ければエラー。
     """
     print('synthe: start')
-    digest = ust_digest(engine)
     features, meta = load_features(engine)
-    if features is None:
-        features = load_legacy_melf0(engine)
-    elif meta.get('ust') != digest:
-        features = None
+    if cache_only:
+        if features is None:
+            features = load_legacy_melf0(engine)
+        if features is None:
+            raise FileNotFoundError('the UST file is missing and no cached features to synthesize from')
+        # シードは通常の合成と同じく、キャッシュを作ったときの UST から決める
+        digest = meta['ust'] if meta else ust_digest(engine)
+    else:
+        digest = ust_digest(engine)
+        if features is None:
+            features = load_legacy_melf0(engine)
+        elif meta.get('ust') != digest:
+            features = None
     if features is None:
         print('synthe: no cached features, running acoustic')
         run_acoustic_pipeline(engine, style_shift, digest)
@@ -381,15 +406,16 @@ def main():
             elif support and request[0] == 'config':
                 response['result'] = config(request[1] if len(request) > 1 else None, engine_dict)
             elif support:
+                path_plugin, cache_only = resolve_plugin_path(request)
                 if request[3] in engine_dict:
                     engine,duration,request_time = engine_dict[request[3]]
-                    enunu.update_path(request[1],engine)
+                    enunu.update_path(path_plugin,engine)
                     # 使うたびに期限を延ばす (最後に使ってから duration 秒で破棄)
                     request_time = time.time()
                     engine_dict[request[3]] = engine,duration,request_time
                 else:
                     duration = int(request[4])
-                    engine = enunu.setup(request[1])
+                    engine = enunu.setup(path_plugin)
                     request_time = time.time()
                     engine_dict[request[3]] = engine,duration,request_time
 
@@ -404,7 +430,7 @@ def main():
                     editor_f0 = np.asarray(request[5], dtype=np.float64)
                     response['result'] = acoustic_f0(engine, editor_f0, parse_style_shift(request, 6))
                 elif request[0] == 'synthe':
-                    response['result'] = synthe(request[2],engine, parse_style_shift(request, 5))
+                    response['result'] = synthe(request[2],engine, parse_style_shift(request, 5), cache_only)
                 else:
                     raise NotImplementedError('unexpected command %s' % request[0])
             else:

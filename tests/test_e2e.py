@@ -219,6 +219,37 @@ class ServerE2EBase:
         # lf0 を使い回しても、シード固定により acoustic 単体と同じ結果になる
         self.assertTrue(all(np.array_equal(a, np.asarray(b)) for a, b in zip(alone, after_pitch)))
 
+    def test_synthe_without_tmp(self):
+        # OpenUtau の「選択ノートのキャッシュ削除」は tmp だけを消し、_enutemp は残す
+        self.request('acoustic', self.tmp_a)
+        wav_normal = self.request('synthe', self.tmp_a)
+        backup = self.tmp_a + '.bak'
+        os.replace(self.tmp_a, backup)
+        try:
+            with Counter() as c:
+                path, cache_only = S.resolve_plugin_path(['synthe', self.tmp_a, '', 'X', '600'])
+                self.assertTrue(cache_only)
+                self.assertTrue(path.endswith('temp.ust'))
+                enunu.update_path(path, self.engine)
+                wav = os.path.join(self.work, f'out{next(self.wav_ids)}.wav')
+                S.synthe(wav, self.engine, 0, cache_only)
+                self.assertEqual(c.acoustic, 0)
+            from scipy.io import wavfile
+            np.testing.assert_array_equal(wavfile.read(wav)[1], wavfile.read(wav_normal)[1])
+            # キャッシュも無ければ分かりやすいエラー (melf0 は旧形式の mel.npy からも復元するので消す)
+            os.remove(self.engine.path_features_npz)
+            if os.path.isfile(self.engine.path_mel_npy):
+                os.remove(self.engine.path_mel_npy)
+            with self.assertRaises(FileNotFoundError):
+                S.synthe(wav, self.engine, 0, cache_only)
+        finally:
+            os.replace(backup, self.tmp_a)
+        # tmp もワークフォルダも無い場合
+        with self.assertRaises(FileNotFoundError):
+            S.resolve_plugin_path(['synthe', os.path.join(self.work, 'enu-none.tmp'), '', 'X', '600'])
+        # synthe 以外は従来どおり
+        self.assertEqual(S.resolve_plugin_path(['acoustic', self.tmp_a, '', 'X', '600']), (self.tmp_a, False))
+
     def test_legacy_melf0_workfolder(self):
         if self.engine.feature_type != 'melf0':
             self.skipTest('melf0 モデルのみ')

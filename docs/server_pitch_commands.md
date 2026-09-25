@@ -106,6 +106,9 @@ lf0_model の dropout、拡散のノイズ、ボコーダのノイズは乱数�
     `synthe` を呼ぶと、キャッシュ済みの特徴量の lf0 をそのピッチに差し替えて合成します。0 のフレームはモデルのピッチのままです。
   - `features.npz` が無い旧版のワークフォルダでも、melf0 モデルなら `mel.npy` / `vuv.npy` / `f0.npy` から復元します。
   - `synthe` の style_shift は、キャッシュが無く作り直すときだけ使います。
+  - **tmp が無い場合**: OpenUtau の「選択ノートのキャッシュ削除」は `enu-*.tmp` だけを消して `_enutemp` を残すので、
+    その後の `synthe` では tmp がありません。この場合は `<tmp名>_enutemp/temp.ust` を代わりに使い、
+    `features.npz`（melf0 は旧形式の npy も可）から合成します。キャッシュも無い場合はエラーを返します。
 
 ## `pitch` — ピッチ（F0）だけを推定する
 
