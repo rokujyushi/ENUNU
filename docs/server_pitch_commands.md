@@ -67,7 +67,7 @@ GPU で動かす場合、拡散モデルのデノイザーを CUDA Graphs で実
 
 ### nnsvs / nnmnkwii / pysptk のオーバーライド（`enulib/nnsvs_speedups.py`）
 
-pip で入れたライブラリは書き換えず、import 時に関数を差し替えています。結果はどれも元の実装と完全に一致します。
+pip で入れたライブラリは書き換えず、import 時に関数を差し替えています。LSTM の差し替え以外は、結果が元の実装と完全に一致します。
 - **質問照合のキャッシュ**（nnmnkwii）: 音素ラベルごとに数千個の正規表現を Python で検索していたので、結果を
   （質問セット, ラベル）ごとに覚えます。1音符を直すと変わるのは前後の数音素だけなので、2回目以降はほとんど検索しません。
 - **`linguistic_features` の使い回し**: 1回の acoustic で同じラベルに対して3回呼ばれていたので、同じ入力なら結果を使い回します。
@@ -75,15 +75,20 @@ pip で入れたライブラリは書き換えず、import 時に関数を差し
 - **lf0 の自己回帰デコーダーの CUDA Graphs 化**（`ResF0NonAttentiveDecoder`）: 1ステップの形はフレーズの長さに関係なく同じなので、
   モデルごとに1回だけ記録して全ステップで再生します。prenet の dropout もグラフ内で同じ乱数の並びになり、結果は一致します。
   `pitch` が約2倍速になります。
+- **系列が1本だけの LSTM をパックせずに実行**（`torch.nn.LSTM`）: nnsvs の vuv モデル（FFConvLSTM）と lf0 モデルのエンコーダーは
+  可変長のために `pack_padded_sequence` を使いますが、サーバーは常にバッチサイズ 1 です。cuDNN のパック入力の経路は非常に遅く
+  （RTX 5060 Ti / cuDNN 9.10 で、600 フレームの 2 層 BiLSTM が 98 ms、通常のテンソルなら 1.3 ms）、残っていた時間の大半を占めていました。
+  カーネルが変わるので出力は 1e-6 程度ずれ、拡散を通った後で mgc/bap/mel に最大 0.002〜0.02 程度の差が出ます
+  （シードを変えたときのばらつきより桁違いに小さい）。何度実行しても同じ結果になる点は変わりません。
 
-`ENUNU_NNSVS_SPEEDUPS=0` で最初の3つを、`ENUNU_CUDA_GRAPHS=0` で CUDA Graphs（拡散と lf0 デコーダー）を無効にできます。
+`ENUNU_NNSVS_SPEEDUPS=0` で CUDA Graphs 以外を、`ENUNU_CUDA_GRAPHS=0` で CUDA Graphs（拡散と lf0 デコーダー）を無効にできます。
 
 6.5秒のフレーズでの比較（RTX 5060 Ti。「元」は両方を無効にした状態）:
 
 | | 元 | 最適化あり |
 |---|---|---|
-| KanadeShia acoustic / pitch | 2.43 s / 0.65 s | 1.31 s / 0.35 s |
-| 欲音ルコ melf0 acoustic / pitch | 1.48 s / 0.54 s | 0.88 s / 0.31 s |
+| KanadeShia acoustic / pitch | 2.50 s / 0.67 s | 0.61 s / 0.18 s |
+| 欲音ルコ melf0 acoustic / pitch | 1.69 s / 0.75 s | 0.33 s / 0.11 s |
 
 ### 拡張機能の実行
 

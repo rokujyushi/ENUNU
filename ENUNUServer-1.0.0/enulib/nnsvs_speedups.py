@@ -2,7 +2,7 @@
 """NNSVS / nnmnkwii / pysptk の遅い部分を、結果を変えずに速くするオーバーライド。
 
 pip で入れたライブラリは書き換えず、import 時に関数を差し替える (apply() を1回呼ぶ)。
-どれも元の実装と完全に同じ結果を返す (tests/test_unit.py で確認)。
+LSTM 以外は元の実装と完全に同じ結果を返す (tests/test_unit.py で確認)。
 
 - nnmnkwii の質問照合 (pattern_matching_binary / pattern_matching_continous_position):
   音素ラベルごとに数千個の正規表現を Python のループで検索していた。
@@ -11,6 +11,8 @@ pip で入れたライブラリは書き換えず、import 時に関数を差し
 - nnmnkwii の linguistic_features: 1回の acoustic で同じラベルに対して最大3回呼ばれる
   (predict_acoustic / postprocess_acoustic / gen_spsvs_static_features)。同じ入力なら結果を使い回す。
 - pysptk.util.mcepalpha: サンプリングレートだけで決まる定数を毎回数値探索していた。
+- torch.nn.LSTM: 系列が1本だけの PackedSequence は通常のテンソルとして実行する (cuDNN のパック経路が非常に遅い)。
+  カーネルが変わるので出力は 1e-6 程度ずれる。
 """
 import functools
 from collections import OrderedDict
@@ -99,6 +101,36 @@ def apply():
 
     pysptk.util.mcepalpha = functools.lru_cache(maxsize=16)(pysptk.util.mcepalpha)
     # nnsvs.gen は `pysptk.util.mcepalpha(...)` の形で呼ぶので、モジュール属性の差し替えで効く
+
+    _patch_single_sequence_lstm()
+
+
+def _patch_single_sequence_lstm():
+    """系列が1本だけの PackedSequence を LSTM に渡されたら、通常のテンソルとして実行する。
+
+    nnsvs の FFConvLSTM や lf0 モデルのエンコーダーは可変長のために pack_padded_sequence を使うが、
+    サーバーは常にバッチサイズ 1 なのでパックの意味がない。cuDNN のパック入力の経路は非常に遅く
+    (RTX 5060 Ti / cuDNN 9.10 で 600 フレームの 2 層 BiLSTM が 98 ms、通常のテンソルなら 1.3 ms)、
+    これが vuv モデルと lf0 モデルの時間の大半を占めていた。出力は元どおり PackedSequence に戻して返す。
+    """
+    import torch
+    from torch.nn.utils.rnn import PackedSequence
+
+    lstm_cls = torch.nn.LSTM
+    if getattr(lstm_cls, '_enunu_single_sequence', False):
+        return
+    original_forward = lstm_cls.forward
+
+    def forward(self, input, hx=None):
+        if not (isinstance(input, PackedSequence) and bool((input.batch_sizes == 1).all())):
+            return original_forward(self, input, hx)
+        data = input.data.unsqueeze(0) if self.batch_first else input.data.unsqueeze(1)
+        output, hidden = original_forward(self, data, hx)
+        output = output.squeeze(0) if self.batch_first else output.squeeze(1)
+        return PackedSequence(output, input.batch_sizes, input.sorted_indices, input.unsorted_indices), hidden
+
+    lstm_cls.forward = forward
+    lstm_cls._enunu_single_sequence = True
 
 
 class _DecoderStepGraph:

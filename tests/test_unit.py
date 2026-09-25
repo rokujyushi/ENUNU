@@ -187,6 +187,27 @@ class TestNnsvsSpeedups(unittest.TestCase):
             second = m.linguistic_features(self.labels, self.binary_dict, self.numeric_dict, **kwargs)
             np.testing.assert_array_equal(second, expected)
 
+    def test_single_sequence_lstm(self):
+        import torch
+        from torch.nn.utils.rnn import PackedSequence, pack_padded_sequence, pad_packed_sequence
+        devices = ['cpu'] + (['cuda'] if torch.cuda.is_available() else [])
+        for device in devices:
+            torch.manual_seed(0)
+            lstm = torch.nn.LSTM(8, 16, 2, batch_first=True, bidirectional=True).to(device).eval()
+            x = torch.randn(1, 50, 8, device=device)
+            with torch.no_grad():
+                packed_out, (h, c) = lstm(pack_padded_sequence(x, [50], batch_first=True))
+                self.assertIsInstance(packed_out, PackedSequence)
+                out, _ = pad_packed_sequence(packed_out, batch_first=True)
+                ref, (h_ref, c_ref) = lstm(x)   # 通常のテンソル (差し替えの対象外)
+                torch.testing.assert_close(out, ref, rtol=1e-5, atol=1e-5)
+                torch.testing.assert_close(h, h_ref, rtol=1e-5, atol=1e-5)
+                # バッチが 2 以上なら元の経路 (パックのまま)
+                x2 = torch.randn(2, 50, 8, device=device)
+                out2, _ = lstm(pack_padded_sequence(x2, [50, 30], batch_first=True))
+                self.assertIsInstance(out2, PackedSequence)
+                self.assertEqual(out2.data.shape[0], 80)
+
     def test_mcepalpha_cached(self):
         import pysptk.util
         self.assertEqual(pysptk.util.mcepalpha(48000), pysptk.util.mcepalpha.__wrapped__(48000))
