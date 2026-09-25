@@ -17,6 +17,7 @@ import tkinter
 from argparse import ArgumentParser
 from datetime import datetime
 from glob import glob
+import copy
 import os
 from os import chdir, listdir, makedirs, rename, startfile, remove
 from os.path import (
@@ -230,19 +231,12 @@ class ENUNU(SPSVS):
         self.path_vuv_npy = None
         self.path_spectrogram_npy = None
         self.path_aperiodicity_npy = None
+        self.path_features_npz = None
+        self.path_editorf0_npy = None
         self.path_question = None
         self.start_time = None
-        # PNDM 拡散スピードアップ (bap: デフォルト 10倍速)
-        # ENUNU_DIFFUSION_SPEEDUP=N で bap の拡散ステップを 1/N に削減。
-        # ENUNU_DIFFUSION_TARGETS=all で mgc にも適用 (プレビュー品質)。
-        # ENUNU_DIFFUSION_METHOD=eta1 でテクスチャを保持した間引き DDPM。
-        speedup_env = os.environ.get("ENUNU_DIFFUSION_SPEEDUP", "10")
-        try:
-            _speedup = int(speedup_env)
-        except ValueError:
-            _speedup = 10
-        if _speedup > 1:
-            self._apply_pndm_speedup(_speedup)
+        # 拡散モデルのサンプリングを間引いて高速化する (設定は diffusion_settings() を参照)
+        self.apply_diffusion_settings(diffusion_settings())
 # ↑EnunuServerCustom
 
 # ↓EnunuServerCustom
@@ -271,6 +265,9 @@ class ENUNU(SPSVS):
         self.path_vuv_npy = join(temp_dir, 'vuv.npy')
         self.path_spectrogram_npy = join(temp_dir, 'spectrogram.npy')
         self.path_aperiodicity_npy = join(temp_dir, 'aperiodicity.npy')
+        # 音響特徴量そのもの (ボコーダ合成用キャッシュ) と、旧クライアントが置くエディタのピッチ
+        self.path_features_npz = join(temp_dir, 'features.npz')
+        self.path_editorf0_npy = join(temp_dir, 'editorf0.npy')
         self.path_question = join(temp_dir, 'temp.hed')
 # ↑EnunuServerCustom
 
@@ -624,42 +621,40 @@ class ENUNU(SPSVS):
             and lf0_model.prediction_type() != PredictionType.PROBABILISTIC
         )
 
-    def _apply_pndm_speedup(self, speedup: int) -> None:
-        """acoustic_model 配下の GaussianDiffusion に PLMS/DDIM/eta1 スピードアップを仕掛ける。
+    def apply_diffusion_settings(self, settings: dict) -> None:
+        """acoustic_model 配下の GaussianDiffusion ごとにサンプラとステップ数を設定する。
 
-        環境変数:
-          ENUNU_DIFFUSION_SPEEDUP  : 間引き倍率 (デフォルト 10)。1 で無効。
-          ENUNU_DIFFUSION_TARGETS  : "bap" (デフォルト) / "all" / "mgc"
-          ENUNU_DIFFUSION_METHOD   : "plms" (デフォルト) / "ddim" / "eta1"
-
-        bap は PLMS 10step でも音質劣化なし (検証済み)。
-        mgc に適用する場合は METHOD=eta1 を推奨。
+        settings: diffusion_settings() の戻り値 ({'mgc': {'method': 'ddim', 'steps': 25}, ...})。
+        モジュール名に mgc / mel / bap を含むものにそれぞれの設定を、それ以外には 'other' を使う。
+        何度呼んでもよい (config コマンドで実行中に変更する)。
         """
-        targets = os.environ.get("ENUNU_DIFFUSION_TARGETS", "bap").lower()
-        method = os.environ.get("ENUNU_DIFFUSION_METHOD", "plms").lower()
         try:
             from nnsvs.diffsinger.diffusion import GaussianDiffusion, extract
         except Exception as e:
-            logger.warning("GaussianDiffusion を import できず speedup 無効: %s", e)
+            logger.warning("GaussianDiffusion を import できず拡散設定を適用できません: %s", e)
             return
-        patched_names: list = []
+        applied = []
         for name, m in self.acoustic_model.named_modules():
             if not isinstance(m, GaussianDiffusion):
                 continue
             short = name.split(".")[-1] if name else "(root)"
-            if not (targets == "all" or targets in short):
-                continue
-            m.pndm_speedup = speedup
-            if method == "ddim":
-                _bind_ddim_sampler(m, extract)
-            elif method == "eta1":
-                _bind_eta1_sampler(m, extract)
-            patched_names.append(short)
-        if patched_names:
-            logger.info("拡散サンプラ=%s speedup=%dx を %s に適用 (targets=%s)",
-                        method, speedup, patched_names, targets)
-        else:
-            logger.info("拡散モデルなし or targets=%s に一致せず、speedup 適用なし", targets)
+            stream = next((k for k in DIFFUSION_STREAMS if k in short), 'other')
+            method, steps = settings[stream]['method'], settings[stream]['steps']
+            # 以前に差し替えたサンプラを外してから設定し直す
+            m.__dict__.pop('p_sample_plms', None)
+            interval = max(1, round(m.K_step / steps)) if method != 'ddpm' else 1
+            if interval <= 1:
+                m.pndm_speedup = None
+                method = 'ddpm'
+            else:
+                m.pndm_speedup = interval
+                if method == 'ddim':
+                    _bind_ddim_sampler(m, extract)
+                elif method == 'eta1':
+                    _bind_eta1_sampler(m, extract)
+            applied.append(f'{short}={method}:{-(-m.K_step // interval)}')
+        if applied:
+            logger.info("拡散サンプラ: %s", ", ".join(applied))
 
     def _acoustic_input(self, labels, f0_shift_in_cent=0):
         """音響モデルへの入力 (正規化済みの楽譜特徴量) と休符フレームのマスクを作る。
@@ -1041,6 +1036,101 @@ class ENUNU(SPSVS):
 
 # ↓EnunuServerCustom
 
+DIFFUSION_STREAMS = ('mgc', 'mel', 'bap')
+DIFFUSION_METHODS = ('ddpm', 'ddim', 'plms', 'eta1')
+# 既定値。mgc / mel は DDIM 25 ステップで 100 ステップとほぼ同等の品質 (2026-09-25 検証)。
+DEFAULT_DIFFUSION = {
+    'mgc': {'method': 'ddim', 'steps': 25},
+    'mel': {'method': 'ddim', 'steps': 25},
+    'bap': {'method': 'plms', 'steps': 10},
+    'other': {'method': 'ddpm', 'steps': 100},
+}
+# config コマンドで変更された設定 (None なら環境変数・既定値)
+_diffusion_override = None
+
+
+def parse_diffusion_spec(spec: str) -> dict:
+    """ 'ddim:25' / 'ddpm' / '25' (手法は既定のまま) を {'method', 'steps'} にする。"""
+    method, _, steps = spec.strip().lower().partition(':')
+    if method.isdigit() and not steps:
+        return {'steps': int(method)}
+    if method not in DIFFUSION_METHODS:
+        raise ValueError(f'unknown diffusion method: {method}')
+    result = {'method': method}
+    if steps:
+        result['steps'] = int(steps)
+    return result
+
+
+def _legacy_env_diffusion() -> dict | None:
+    """旧環境変数 (ENUNU_DIFFUSION_SPEEDUP / TARGETS / METHOD) が指定されていれば、その意味どおりの設定を返す。"""
+    keys = ("ENUNU_DIFFUSION_SPEEDUP", "ENUNU_DIFFUSION_TARGETS", "ENUNU_DIFFUSION_METHOD")
+    if not any(k in os.environ for k in keys):
+        return None
+    try:
+        speedup = max(int(os.environ.get("ENUNU_DIFFUSION_SPEEDUP", "10")), 1)
+    except ValueError:
+        speedup = 10
+    targets = os.environ.get("ENUNU_DIFFUSION_TARGETS", "bap").lower()
+    method = os.environ.get("ENUNU_DIFFUSION_METHOD", "plms").lower()
+    if method not in DIFFUSION_METHODS:
+        method = 'plms'
+    settings = {k: {'method': 'ddpm', 'steps': 100} for k in (*DIFFUSION_STREAMS, 'other')}
+    if speedup > 1:
+        for k in DIFFUSION_STREAMS:
+            if targets == 'all' or targets in k:
+                settings[k] = {'method': method, 'steps': max(1, 100 // speedup)}
+    return settings
+
+
+def diffusion_settings() -> dict:
+    """拡散モデルのサンプラ設定を返す。優先順: config コマンド > 環境変数 > 既定値。
+
+    環境変数:
+      ENUNU_DIFFUSION_MGC / _MEL / _BAP : 'ddim:25' のように手法:ステップ数
+      (旧) ENUNU_DIFFUSION_SPEEDUP / TARGETS / METHOD : 指定されている場合は従来の意味で解釈
+    """
+    if _diffusion_override is not None:
+        return copy.deepcopy(_diffusion_override)
+    settings = _legacy_env_diffusion() or copy.deepcopy(DEFAULT_DIFFUSION)
+    for k in DIFFUSION_STREAMS:
+        spec = os.environ.get(f"ENUNU_DIFFUSION_{k.upper()}")
+        if spec:
+            try:
+                settings[k].update(parse_diffusion_spec(spec))
+            except ValueError as e:
+                logger.warning("ENUNU_DIFFUSION_%s を無視します: %s", k.upper(), e)
+    return settings
+
+
+def set_diffusion_settings(request: dict) -> dict:
+    """config コマンドの diffusion 設定を検証して反映し、反映後の設定を返す。
+
+    request 例: {'steps': 25}  (mgc と mel のステップ数だけ変える)
+               {'mgc': {'method': 'ddim', 'steps': 25}, 'bap': 'plms:10'}
+               {'reset': True}  (環境変数・既定値に戻す)
+    """
+    global _diffusion_override
+    if request.get('reset'):
+        _diffusion_override = None
+        return diffusion_settings()
+    settings = diffusion_settings()
+    if 'steps' in request:
+        for k in ('mgc', 'mel'):
+            settings[k]['steps'] = request['steps']
+    for k in DIFFUSION_STREAMS:
+        if k in request:
+            value = request[k]
+            settings[k].update(parse_diffusion_spec(value) if isinstance(value, str) else value)
+    for k, v in settings.items():
+        if v.get('method') not in DIFFUSION_METHODS:
+            raise ValueError(f'unknown diffusion method for {k}: {v.get("method")}')
+        if not isinstance(v.get('steps'), int) or isinstance(v['steps'], bool) or v['steps'] < 1:
+            raise ValueError(f'diffusion steps for {k} must be a positive integer')
+    _diffusion_override = settings
+    return copy.deepcopy(settings)
+
+
 def _bind_ddim_sampler(gauss_diffusion, extract_fn) -> None:
     """GaussianDiffusion の p_sample_plms を DDIM (η=0) に置き換える。"""
     import types
@@ -1138,7 +1228,7 @@ def run_timing(engine: ENUNU,step=None):
             f.write(str(nnsvs.io.hts.full_to_mono(duration_modified_labels)))
         duration_modified_labels = engine.edit_timing(duration_modified_labels,"timing_editor_2")
 
-def run_acoustic(engine: ENUNU,kind='linear',editor_f0=None):
+def run_acoustic(engine: ENUNU,kind='linear',editor_f0=None,style_shift=0):
     engine.svs_acoustic(
             dtype=np.float32,
             vocoder_type='auto',
@@ -1147,10 +1237,12 @@ def run_acoustic(engine: ENUNU,kind='linear',editor_f0=None):
             segmented_synthesis=False,
             kind=kind,
             editor_f0=editor_f0,
+            style_shift=style_shift,
         )
 
-def run_pitch(engine: ENUNU):
-    engine.svs_pitch(
+def run_pitch(engine: ENUNU,style_shift=0):
+    return engine.svs_pitch(
+            style_shift=style_shift,
             vocoder_type='auto',
             post_filter_type='gv',
         )

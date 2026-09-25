@@ -8,6 +8,82 @@
 
 どちらのコマンドも `<ust_path の stem>_enutemp/` をワークフォルダとして使います（`acoustic` と同じ）。
 
+## 後方互換について
+
+旧クライアント（SimpleENUNUServer / ENUNUServer / 韓国語版 ENUNUServer 向けの OpenUtau）を壊さないよう、
+以下の追加はすべて「任意のリクエスト要素」と「レスポンスへの項目追加」だけで行っています。
+既存の項目名・意味・`ver_check` の `name` / `version` は変えていません。
+
+### `ver_check` の `features`（追加項目）
+
+```json
+{"result": {"name": "SimpleENUNUServer", "version": "1.0.0", "author": "roku10shi",
+            "features": {"commands": ["timing", "acoustic", "pitch", "acoustic_f0", "synthe", "config"],
+                         "style_shift": true, "pitch_n_frames": true,
+                         "diffusion": {"mgc": {"method": "ddim", "steps": 25},
+                                       "mel": {"method": "ddim", "steps": 25},
+                                       "bap": {"method": "plms", "steps": 10},
+                                       "other": {"method": "ddpm", "steps": 100}}}}}
+```
+
+- `features` が無いサーバーは旧版とみなし、`pitch` / `acoustic_f0` を使わないでください。
+- `lf0_conditioning` はモデルを読むまで分からないので、ここではなく `pitch` / `acoustic_f0` のレスポンスで返します。
+
+### 拡散モデルのステップ数と `config` コマンド
+
+拡散モデル（DiffSinger 系の mgc / mel / bap）はサンプリングを間引いて高速化しています。
+既定値は mgc / mel が DDIM 25 ステップ、bap が PLMS 10 ステップです。
+（mgc / mel は 25 ステップの DDIM で、100 ステップとほぼ同じ品質。2026-09-25 に数値比較で確認）
+
+`method` は `ddpm`（間引きなし）/ `ddim` / `plms` / `eta1` のどれかです。
+設定の優先順位は、`config` コマンド → 環境変数 → 既定値 です。
+
+- 環境変数 `ENUNU_DIFFUSION_MGC` / `_MEL` / `_BAP`: `ddim:25` のように「手法:ステップ数」で指定します。数字だけならステップ数だけを変えます。
+- 旧環境変数 `ENUNU_DIFFUSION_SPEEDUP` / `TARGETS` / `METHOD` を指定している場合は、従来の意味で解釈します
+  （対象外のストリームは間引きなし、`SPEEDUP=1` はすべて間引きなし）。
+
+`config` コマンドでは、実行中に全エンジンの設定を変えられます（OpenUtau の環境設定から送る想定）。
+`ver_check` の後に送ってください。歌手を指定する必要はありません。
+
+```json
+["config", {"diffusion": {"steps": 25}}]
+["config", {"diffusion": {"mgc": {"method": "ddim", "steps": 25}, "bap": "plms:10"}}]
+["config", {"diffusion": {"reset": true}}]
+```
+
+- `steps` だけを送ると、mgc と mel のステップ数だけが変わります。
+- レスポンスは `{"result": {"diffusion": <反映後の設定>}}`、不正な値のときは `{"error": "..."}` です。
+- 設定を変えると、`acoustic` は以前の `features.npz` を使わずに計算し直します。
+  クライアント側で npy をキャッシュしている場合は、ステップ数をキャッシュのキーに含めてください。
+
+### 拡張機能の実行
+
+Python の拡張機能（`.py`）は、プロセス起動のコストを省くため、サーバーと同じプロセス内で実行します
+（1回あたり 0.2〜0.3 秒の短縮）。引数・カレントディレクトリ・`sys.path[0]` は subprocess と同じにしています。
+`ENUNU_EXTENSION_INPROCESS=0` にすると、従来どおり subprocess で実行します。
+
+### `style_shift`（任意）
+
+- `timing` 以外のコマンド（`acoustic` / `pitch` / `synthe`）は `request[5]`、`acoustic_f0` は `request[6]` に
+  整数（半音）を置くとスタイルシフトします。省略・数値以外は 0（従来どおり）。
+- ピッチは変えずに声色だけを変えます（USTフラグ `S5` などで使う拡張機能 style_shifter と同じ考え方）。
+  拡張機能と併用すると二重にかかるので、どちらか一方にしてください。
+
+### 音響特徴量のファイルキャッシュ（`features.npz`）と `editorf0.npy`
+
+ニューラルボコーダ向けに、音響特徴量はワークフォルダの `features.npz` にそのまま保存します
+（WORLD: mgc / lf0 / vuv / bap、melf0: mel / lf0 / vuv。作った条件と UST のハッシュも一緒に保存）。
+メモリには最後の1フレーズ分しか持たないので、フレーズが増えてもメモリは増えません。
+サーバーを再起動しても、ワークフォルダが残っていれば推論なしで合成できます。
+
+- `acoustic`: `features.npz` が同じ UST・`acoustic`・同じ style_shift のものなら推論を省略します。
+- `acoustic_f0`: 毎回計算し、結果を `features.npz` に保存します。
+- `synthe`: `features.npz` があれば推論せずに合成します。無ければ `acoustic` を実行してから合成します。
+  - **ピッチだけ変えた場合（旧クライアント互換）**: ワークフォルダに `editorf0.npy`（float64、Hz、`(T,)`）を置いて
+    `synthe` を呼ぶと、キャッシュ済みの特徴量の lf0 をそのピッチに差し替えて合成します。0 のフレームはモデルのピッチのままです。
+  - `features.npz` が無い旧版のワークフォルダでも、melf0 モデルなら `mel.npy` / `vuv.npy` / `f0.npy` から復元します。
+  - `synthe` の style_shift は、キャッシュが無く作り直すときだけ使います。
+
 ## `pitch` — ピッチ（F0）だけを推定する
 
 ```json
@@ -17,8 +93,10 @@
 レスポンス:
 
 ```json
-{"result": {"path_f0": "<enutemp>/pitch_f0.npy", "lf0_conditioning": true}}
+{"result": {"path_f0": "<enutemp>/pitch_f0.npy", "lf0_conditioning": true, "n_frames": 1234}}
 ```
+
+- `n_frames`: `pitch_f0.npy` のフレーム数。`acoustic_f0` に送る配列の長さはこれに合わせます（ファイルを読む必要がありません）。
 
 - `pitch_f0.npy`: float64、形状 `(T,)`、単位は Hz、フレーム周期は `frame_period`（通常 5 ms）。休符フレームは 0 です。
   フレーム数は同じ UST に対する `acoustic` の `f0.npy` と一致します。
@@ -52,8 +130,8 @@
 
 ## 想定しているクライアントの流れ（EnunuRenderer）
 
-1. `pitch` → `pitch_f0.npy`。フレーム数を得るのと、描画用ピッチ（LoadRenderedPitch）に使います。
-2. フレーム数 = `len(pitch_f0)` として editorF0 配列を作ります。
+1. `pitch` → `pitch_f0.npy`。描画用ピッチ（LoadRenderedPitch）に使います。
+2. フレーム数 = レスポンスの `n_frames` として editorF0 配列を作ります。
 3. `["acoustic_f0", ..., editorF0.ToList()]` — f0 配列をリクエスト `[5]` に直接埋め込んで送信します。
    → f0 / sp / ap（WORLD）または mel / vuv（melf0）を受け取ります。
 4. これまでどおり WORLD 合成、または `synthe` を呼びます。
