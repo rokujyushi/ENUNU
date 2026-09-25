@@ -144,6 +144,28 @@ class TestEditorF0(unittest.TestCase):
             np.testing.assert_allclose(np.exp(out[1].flatten()), [330, 330, 220, 220, 220], rtol=1e-5)
 
 
+@unittest.skipUnless(__import__('torch').cuda.is_available(), 'CUDA が必要')
+class TestGraphedDenoiser(unittest.TestCase):
+    def test_same_output_as_eager(self):
+        import torch
+        from nnsvs.diffsinger.denoiser import DiffNet
+        torch.manual_seed(0)
+        net = DiffNet(in_dim=20, encoder_hidden_dim=32, residual_layers=4, residual_channels=32).cuda().eval()
+        torch.nn.init.normal_(net.output_projection.weight)   # 既定はゼロ初期化で出力が常に 0 になるため
+        graphed = enunu.GraphedDenoiser(net, max_graphs=2)
+        with torch.no_grad():
+            for T in (50, 80, 50, 120):          # 長さが変わる・戻る・上限を超える
+                x = torch.randn(1, 1, 20, T, device='cuda')
+                t = torch.tensor([7], device='cuda')
+                cond = torch.randn(1, 32, T, device='cuda')
+                torch.testing.assert_close(graphed(x, t, cond), net(x, t, cond=cond), rtol=0, atol=0)
+        self.assertEqual(len(graphed.graphs), 2)  # LRU で上限を守る
+        self.assertEqual(graphed.failed, set())
+        # 勾配を計算するときはグラフを使わない
+        x.requires_grad_(True)
+        self.assertTrue(graphed(x, t, cond).requires_grad)
+
+
 class TestExtensionInProcess(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

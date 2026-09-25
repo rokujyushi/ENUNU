@@ -34,6 +34,7 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 from shutil import move
 from tempfile import TemporaryDirectory, mkdtemp
 from tkinter.filedialog import asksaveasfilename
+from collections import OrderedDict
 from collections.abc import Iterable
 import numpy as np
 import utaupy
@@ -651,6 +652,10 @@ class ENUNU(SPSVS):
             short = name.split(".")[-1] if name else "(root)"
             stream = next((k for k in DIFFUSION_STREAMS if k in short), 'other')
             method, steps = settings[stream]['method'], settings[stream]['steps']
+            # デノイザーを CUDA Graphs で実行する (1回だけ包む)
+            if (torch.device(self.device).type == 'cuda' and os.environ.get('ENUNU_CUDA_GRAPHS', '1') != '0'
+                    and not isinstance(m.denoise_fn, GraphedDenoiser)):
+                m.denoise_fn = GraphedDenoiser(m.denoise_fn)
             # 以前に差し替えたサンプラを外してから設定し直す
             m.__dict__.pop('p_sample_plms', None)
             interval = max(1, round(m.K_step / steps)) if method != 'ddpm' else 1
@@ -1067,6 +1072,69 @@ class ENUNU(SPSVS):
         return wav, self.sample_rate
 
 # ↓EnunuServerCustom
+
+class GraphedDenoiser(torch.nn.Module):
+    """拡散モデルのデノイザー (DiffNet) を CUDA Graphs で実行するラッパー。
+
+    デノイザーは 1 回の推論で 20〜100 回呼ばれ、1 回ごとの計算は小さいので、GPU の計算より
+    Python とカーネル起動のオーバーヘッドが律速になっている (フレーズを長くしても時間がほぼ変わらない)。
+    入力の形 (フレーズの長さ) ごとに 1 回グラフを記録し、以降は入力をコピーして再生するだけにする。
+    記録に失敗した形は通常の実行に戻す。ENUNU_CUDA_GRAPHS=0 で無効 (ラップしない)。
+    """
+
+    def __init__(self, inner, max_graphs=4):
+        super().__init__()
+        self.inner = inner
+        self.in_dim = inner.in_dim
+        self.max_graphs = max_graphs
+        self.graphs = OrderedDict()
+        self.failed = set()
+        # 同じモデルのグラフ間でメモリプールを共有する (順番に 1 つずつしか再生しないので安全)
+        self.pool = None
+
+    def forward(self, x, t, cond):
+        if not x.is_cuda or torch.is_grad_enabled():
+            return self.inner(x, t, cond=cond)
+        key = (tuple(x.shape), tuple(t.shape), tuple(cond.shape), x.dtype, t.dtype, cond.dtype, x.device)
+        if key in self.failed:
+            return self.inner(x, t, cond=cond)
+        entry = self.graphs.get(key)
+        if entry is None:
+            try:
+                entry = self._capture(x, t, cond)
+            except Exception as e:  # noqa: BLE001
+                logger.warning('CUDA Graphs capture failed for %s, running eagerly: %s', key[0], e)
+                self.failed.add(key)
+                return self.inner(x, t, cond=cond)
+            self.graphs[key] = entry
+            while len(self.graphs) > self.max_graphs:
+                self.graphs.popitem(last=False)
+        else:
+            self.graphs.move_to_end(key)
+        graph, static_x, static_t, static_cond, static_out = entry
+        static_x.copy_(x)
+        static_t.copy_(t)
+        static_cond.copy_(cond)
+        graph.replay()
+        # 次の再生で上書きされるので複製して返す (PLMS は過去の出力を保持する)
+        return static_out.clone()
+
+    def _capture(self, x, t, cond):
+        static_x, static_t, static_cond = x.clone(), t.clone(), cond.clone()
+        # 記録の前に別ストリームで数回実行しておく (cuDNN のアルゴリズム選択などを済ませる)
+        stream = torch.cuda.Stream(device=x.device)
+        stream.wait_stream(torch.cuda.current_stream(x.device))
+        with torch.cuda.stream(stream):
+            for _ in range(2):
+                self.inner(static_x, static_t, cond=static_cond)
+        torch.cuda.current_stream(x.device).wait_stream(stream)
+        if self.pool is None:
+            self.pool = torch.cuda.graph_pool_handle()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, pool=self.pool):
+            static_out = self.inner(static_x, static_t, cond=static_cond)
+        return graph, static_x, static_t, static_cond, static_out
+
 
 DIFFUSION_STREAMS = ('mgc', 'mel', 'bap')
 DIFFUSION_METHODS = ('ddpm', 'ddim', 'plms', 'eta1')
