@@ -1,0 +1,4 @@
+type=editplugin
+folder=ENUNUServer-1.0.0
+contentsdir=ENUNUServer-1.0.0
+description=NNSVSモデルに歌ってもらうUTAUプラグイン
