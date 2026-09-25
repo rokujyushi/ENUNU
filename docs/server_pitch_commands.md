@@ -77,7 +77,9 @@ Python の拡張機能（`.py`）は、プロセス起動のコストを省く�
 サーバーを再起動しても、ワークフォルダが残っていれば推論なしで合成できます。
 
 - `acoustic`: `features.npz` が同じ UST・`acoustic`・同じ style_shift のものなら推論を省略します。
-- `acoustic_f0`: 毎回計算し、結果を `features.npz` に保存します。
+- `acoustic_f0`: `features.npz` が同じ UST・同じ style_shift・同じエディタのピッチ（配列のハッシュ）の `acoustic_f0` のものなら推論を省略し、それ以外は計算して保存します。
+- `pitch`: `pitch_f0.npy` の横に条件を `pitch_f0.json` として保存し、同じ UST・同じ style_shift なら推論を省略します。
+- どのキャッシュも、拡散の設定（`config` / 環境変数）が変わったら使いません。
 - `synthe`: `features.npz` があれば推論せずに合成します。無ければ `acoustic` を実行してから合成します。
   - **ピッチだけ変えた場合（旧クライアント互換）**: ワークフォルダに `editorf0.npy`（float64、Hz、`(T,)`）を置いて
     `synthe` を呼ぶと、キャッシュ済みの特徴量の lf0 をそのピッチに差し替えて合成します。0 のフレームはモデルのピッチのままです。

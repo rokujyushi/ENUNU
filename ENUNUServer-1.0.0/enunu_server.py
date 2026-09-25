@@ -64,14 +64,17 @@ def ust_digest(engine: enunu.ENUNU):
     with open(engine.path_ust, 'rb') as f:
         return hashlib.sha1(f.read()).hexdigest()
 
-def features_meta(engine: enunu.ENUNU, kind, style_shift, digest):
-    # 拡散設定が変わったら (環境設定でステップ数を変えた等) acoustic のキャッシュは使わない
+def features_meta(engine: enunu.ENUNU, kind, style_shift, digest, **extra):
+    # 拡散設定が変わったら (環境設定でステップ数を変えた等) キャッシュは使わない
     return {'kind': kind, 'style_shift': style_shift, 'ust': digest,
-            'feature_type': engine.feature_type, 'diffusion': enunu.diffusion_settings()}
+            'feature_type': engine.feature_type, 'diffusion': enunu.diffusion_settings(), **extra}
 
-def save_features(engine: enunu.ENUNU, kind, style_shift, digest):
+def array_digest(array):
+    return hashlib.sha1(np.ascontiguousarray(array, dtype=np.float64).tobytes()).hexdigest()
+
+def save_features(engine: enunu.ENUNU, kind, style_shift, digest, **extra):
     """音響特徴量をそのまま features.npz に保存する (ボコーダ合成・ピッチ差し替え用のキャッシュ)。"""
-    meta = features_meta(engine, kind, style_shift, digest)
+    meta = features_meta(engine, kind, style_shift, digest, **extra)
     arrays = {f's{i}': np.asarray(a) for i, a in enumerate(engine.multistream_features)}
     np.savez(engine.path_features_npz, meta=np.array(json.dumps(meta)), **arrays)
 
@@ -179,8 +182,24 @@ def pitch(engine: enunu.ENUNU, style_shift=0):
     結果は pitch_f0.npy (f0.npy とは別) に保存する。
     """
     print('pitch: start')
-    enunu.run_timing(engine=engine,step='acoustic')
-    f0 = enunu.run_pitch(engine=engine,style_shift=style_shift)
+    digest = ust_digest(engine)
+    # pitch_f0.npy の横に、作った条件を pitch_f0.json として残す
+    path_meta = os.path.splitext(engine.path_pitch_npy)[0] + '.json'
+    meta = features_meta(engine, 'pitch', style_shift, digest)
+    f0 = None
+    if os.path.isfile(engine.path_pitch_npy) and os.path.isfile(path_meta):
+        try:
+            with open(path_meta, encoding='utf-8') as f:
+                if json.load(f) == meta:
+                    f0 = np.load(engine.path_pitch_npy)
+                    print('pitch: use cached pitch_f0.npy')
+        except Exception as e:
+            print(f'pitch: ignore broken cache ({e})')
+    if f0 is None:
+        enunu.run_timing(engine=engine,step='acoustic')
+        f0 = enunu.run_pitch(engine=engine,style_shift=style_shift)
+        with open(path_meta, 'w', encoding='utf-8') as f:
+            json.dump(meta, f)
     print('pitch: end')
     return {
         'path_f0': engine.path_pitch_npy,
@@ -197,10 +216,19 @@ def acoustic_f0(engine: enunu.ENUNU, editor_f0: np.ndarray, style_shift=0):
     """
     print('acoustic_f0: start')
     digest = ust_digest(engine)
-    enunu.run_timing(engine=engine,step='acoustic')
-    enunu.run_acoustic(engine=engine,editor_f0=editor_f0,style_shift=style_shift)
-    enunu.run_npy(engine=engine)
-    save_features(engine, 'acoustic_f0', style_shift, digest)
+    f0_digest = array_digest(editor_f0)
+    features, meta = load_features(engine)
+    if (features is not None
+            and meta == features_meta(engine, 'acoustic_f0', style_shift, digest, editor_f0=f0_digest)
+            and os.path.isfile(engine.path_f0_npy)):
+        # 同じ UST・同じエディタのピッチで作った結果が残っている (再要求など)
+        print('acoustic_f0: use cached features')
+        engine.multistream_features = features
+    else:
+        enunu.run_timing(engine=engine,step='acoustic')
+        enunu.run_acoustic(engine=engine,editor_f0=editor_f0,style_shift=style_shift)
+        enunu.run_npy(engine=engine)
+        save_features(engine, 'acoustic_f0', style_shift, digest, editor_f0=f0_digest)
     print('acoustic_f0: end')
     return {
         'path_f0': engine.path_f0_npy,
