@@ -147,7 +147,10 @@ def run_extension(path=None, **kwargs):
 
 
 def run_python_extension_inprocess(path, argv):
-    """Pythonの拡張機能を subprocess と同じ条件 (argv / cwd / sys.path[0]) で、同じプロセス内で実行する。
+    """Pythonの拡張機能を subprocess と同じ argv / cwd で、同じプロセス内で実行する。
+
+    拡張機能のフォルダを sys.path の先頭に入れる。同梱の埋め込み Python は ._pth のため
+    subprocess 実行ではこれが入らず同じフォルダのモジュールを import できないが、こちらではできる。
 
     失敗時は subprocess.run(check=True) と同じく CalledProcessError を送出する。
     拡張機能が読み込んだ同じフォルダ内のモジュールは、音源ごとに同名のものがあり得るので実行後に破棄する。

@@ -302,7 +302,8 @@ def poll_socket(socket, timetick = 100):
 def main():
     context = zmq.Context()
     socket = context.socket(zmq.REP)
-    socket.bind('tcp://*:15556')
+    # OpenUtau は 15556 に接続する。ENUNU_SERVER_PORT はテストなどで別ポートを使うため
+    socket.bind(f"tcp://*:{os.environ.get('ENUNU_SERVER_PORT', '15556')}")
     print('Started enunu server')
 
 
