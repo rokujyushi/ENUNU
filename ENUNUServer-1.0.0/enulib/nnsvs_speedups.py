@@ -103,6 +103,51 @@ def apply():
     # nnsvs.gen は `pysptk.util.mcepalpha(...)` の形で呼ぶので、モジュール属性の差し替えで効く
 
     _patch_single_sequence_lstm()
+    _patch_mc2sp()
+
+
+@functools.lru_cache(maxsize=16)
+def _freqt_matrix(in_order, out_order, alpha):
+    """pysptk.freqt (周波数ワーピング) は線形変換なので、単位ベクトルを通して変換行列を作る。"""
+    from pysptk.sptk import freqt
+    basis = np.eye(in_order + 1, dtype=np.float64)
+    matrix = np.stack([freqt(basis[k], out_order, alpha) for k in range(in_order + 1)])
+    matrix.setflags(write=False)
+    return matrix   # (in_order + 1, out_order + 1)
+
+
+def _patch_mc2sp():
+    """pysptk.mc2sp を全フレームまとめて計算する版に差し替える。
+
+    元の実装は 1 フレームずつ freqt を呼び、さらに Python の for ループで対称な配列を組み立てていた
+    (use_world_codec=False の旧来のモデルで、6.5 秒のフレーズの WORLD パラメータ生成に 1.2 秒以上)。
+    freqt を行列積に、対称化と FFT を配列演算にする。結果は行列積の丸め (1e-12 程度) を除いて同じ。
+    """
+    import pysptk
+    import pysptk.conversion
+
+    original = pysptk.conversion.mc2sp
+    if getattr(original, '_enunu_vectorized', False):
+        return
+
+    @functools.wraps(original)
+    def mc2sp(mc, alpha, fftlen):
+        mc = np.asarray(mc, dtype=np.float64)
+        if mc.ndim > 2:
+            return original(mc, alpha, fftlen)
+        frames = np.atleast_2d(mc)
+        half = int(fftlen // 2)
+        c = frames @ _freqt_matrix(frames.shape[-1] - 1, half, float(-alpha))
+        c[:, 0] *= 2.0
+        symc = np.zeros((c.shape[0], int(fftlen)))
+        symc[:, :half + 1] = c
+        symc[:, half + 1:] = c[:, half - 1:0:-1]
+        sp = np.exp(np.fft.rfft(symc, axis=-1).real)
+        return sp[0] if mc.ndim == 1 else sp
+
+    mc2sp._enunu_vectorized = True
+    pysptk.conversion.mc2sp = mc2sp
+    pysptk.mc2sp = mc2sp   # nnsvs.gen は pysptk.mc2sp(...) の形で呼ぶ
 
 
 def _patch_single_sequence_lstm():
@@ -134,20 +179,30 @@ def _patch_single_sequence_lstm():
 
 
 class _DecoderStepGraph:
-    """ResF0NonAttentiveDecoder の自己回帰1ステップを CUDA グラフにしたもの。
+    """自己回帰デコーダー (Tacotron 系の NonAttentiveDecoder) の1ステップを CUDA グラフにしたもの。
 
     1ステップの形はフレーズの長さに関係なく同じなので、モデルごとに1回だけ記録して全ステップで再生する。
     LSTM の状態と前のステップの出力はグラフ内で静的バッファを更新して引き継ぐ。
+    residual=True は ResF0NonAttentiveDecoder (lf0: 楽譜の音高 + 残差)、False は NonAttentiveDecoder (mgc/bap など)。
     """
 
-    def __init__(self, decoder, enc_dim, device, dtype):
+    def __init__(self, decoder, enc_dim, device, dtype, residual=True):
         import torch
         self.decoder = decoder
+        self.residual_mode = residual
         rf = decoder.reduction_factor
         hidden = decoder.lstm[0].hidden_size
         self.enc = torch.zeros(1, enc_dim, device=device, dtype=dtype)
         self.lf0 = torch.zeros(1, 1, rf, device=device, dtype=dtype)
-        self.prev = torch.zeros(1, decoder.out_dim, device=device, dtype=dtype)
+        # 前のステップの出力は、元の forward と同じく (1, out_dim, rf) の最後のフレームのビューとして持つ。
+        # dropout はテンソルのメモリ配置 (stride) によって乱数の割り当てが変わるので、連続したコピーにすると
+        # 同じシードでもマスクが変わる (Yeonu の mgc: rf=2, 60 次元で不一致になった)
+        self.prev_full = torch.zeros(1, decoder.out_dim, rf, device=device, dtype=dtype)
+        self.prev = self.prev_full[:, :, -1]
+        # prenet が無いデコーダーは前の出力に直接 dropout (またはノイズ) をかける。この部分はグラフの外で
+        # 元と同じように実行し、結果だけグラフに渡す (1 ステップあたりカーネルが 1 つ増えるだけ)
+        self.external_noise = decoder.prenet is None
+        self.prenet_in = torch.zeros(1, decoder.out_dim, device=device, dtype=dtype)
         self.h = [torch.zeros(1, hidden, device=device, dtype=dtype) for _ in decoder.lstm]
         self.c = [torch.zeros(1, hidden, device=device, dtype=dtype) for _ in decoder.lstm]
         # 準備の実行と記録でも dropout が乱数を消費するので、乱数の状態を保存して戻す
@@ -171,10 +226,10 @@ class _DecoderStepGraph:
         import torch
         import torch.nn.functional as F
         d = self.decoder
-        if d.prenet is not None:
-            prenet_out = d.prenet(self.prev)
+        if self.external_noise:
+            prenet_out = self.prenet_in   # run() でグラフの外で計算して入れる
         else:
-            prenet_out = F.dropout(self.prev, d.prenet_dropout, training=True)
+            prenet_out = d.prenet(self.prev)
         xs = torch.cat([self.enc, prenet_out], dim=1)
         h, c = d.lstm[0](xs, (self.h[0], self.c[0]))
         new_h, new_c = [h], [c]
@@ -184,79 +239,137 @@ class _DecoderStepGraph:
             new_c.append(c)
         hcs = torch.cat([new_h[-1], self.enc], dim=1)
         out = d.feat_out(hcs).view(1, d.out_dim, -1)
-        if d.scaled_tanh:
-            max_lf0_ratio = 600 * np.log(2) / 1200
-            lf0_residual = max_lf0_ratio * torch.tanh(out[:, d.out_lf0_idx, :]).unsqueeze(1)
-        else:
-            lf0_residual = out[:, d.out_lf0_idx, :].unsqueeze(1)
-        lf0_pred = (self.lf0 + lf0_residual - d.out_lf0_mean) / d.out_lf0_scale
-        out[:, d.out_lf0_idx, :] = lf0_pred.squeeze(1)
+        lf0_residual = out[:, :1, :]   # residual=False では使わない
+        if self.residual_mode:
+            if d.scaled_tanh:
+                max_lf0_ratio = 600 * np.log(2) / 1200
+                lf0_residual = max_lf0_ratio * torch.tanh(out[:, d.out_lf0_idx, :]).unsqueeze(1)
+            else:
+                lf0_residual = out[:, d.out_lf0_idx, :].unsqueeze(1)
+            lf0_pred = (self.lf0 + lf0_residual - d.out_lf0_mean) / d.out_lf0_scale
+            out[:, d.out_lf0_idx, :] = lf0_pred.squeeze(1)
         for i in range(len(d.lstm)):
             self.h[i].copy_(new_h[i])
             self.c[i].copy_(new_c[i])
-        self.prev.copy_(out[:, :, -1])
+        self.prev_full.copy_(out)
         return out, lf0_residual
 
-    def run(self, encoder_outs, lf0_score_denorm):
+    def _noise(self, prev):
+        """prenet が無いデコーダーの入力 (元の forward と同じ)。"""
         import torch
-        rf = self.decoder.reduction_factor
+        import torch.nn.functional as F
+        d = self.decoder
+        if getattr(d, 'prenet_noise_std', 0) > 0:
+            return prev + torch.randn_like(prev) * d.prenet_noise_std
+        return F.dropout(prev, d.prenet_dropout, training=True)
+
+    def run(self, encoder_outs, lf0_score_denorm=None):
+        import torch
+        d = self.decoder
+        rf = d.reduction_factor
         steps = encoder_outs.shape[1]
-        for x in (*self.h, *self.c, self.prev):
+        for x in (*self.h, *self.c):
             x.zero_()
-        outs = torch.empty(1, self.decoder.out_dim, steps * rf, device=encoder_outs.device, dtype=encoder_outs.dtype)
-        residuals = torch.empty(1, 1, steps * rf, device=encoder_outs.device, dtype=encoder_outs.dtype)
+        # 最初の入力 (go frame): ResF0 は 0、NonAttentiveDecoder は initial_value。
+        # 元の forward と同じく連続した (1, out_dim) のテンソルとして作る (dropout の乱数の割り当てを合わせる)
+        go_frame = torch.full((1, d.out_dim), 0.0 if self.residual_mode else float(getattr(d, 'initial_value', 0.0)),
+                              device=encoder_outs.device, dtype=encoder_outs.dtype)
+        self.prev.copy_(go_frame)
+        outs = torch.empty(1, d.out_dim, steps * rf, device=encoder_outs.device, dtype=encoder_outs.dtype)
+        residuals = None
+        if self.residual_mode:
+            residuals = torch.empty(1, 1, steps * rf, device=encoder_outs.device, dtype=encoder_outs.dtype)
         for t in range(steps):
             self.enc.copy_(encoder_outs[:, t])
-            self.lf0.copy_(lf0_score_denorm[:, :, t * rf:(t + 1) * rf])
+            if self.residual_mode:
+                self.lf0.copy_(lf0_score_denorm[:, :, t * rf:(t + 1) * rf])
+            if self.external_noise:
+                self.prenet_in.copy_(self._noise(go_frame if t == 0 else self.prev))
             self.graph.replay()
             outs[:, :, t * rf:(t + 1) * rf] = self.out
-            residuals[:, :, t * rf:(t + 1) * rf] = self.residual
-        return outs.transpose(1, 2), residuals.transpose(1, 2)
+            if self.residual_mode:
+                residuals[:, :, t * rf:(t + 1) * rf] = self.residual
+        if self.residual_mode:
+            return outs.transpose(1, 2), residuals.transpose(1, 2)
+        return outs.transpose(1, 2)
+
+
+def _graph_runner(decoder, encoder_outs, residual):
+    """デコーダーに紐づくグラフを返す (入力の次元などが変わったら記録し直す)。失敗したら None。"""
+    key = (encoder_outs.shape[2], encoder_outs.device, encoder_outs.dtype)
+    runner = getattr(decoder, '_enunu_step_graph', None)
+    if runner is None or runner[0] != key:
+        try:
+            runner = (key, _DecoderStepGraph(decoder, key[0], key[1], key[2], residual))
+        except Exception as e:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).warning('decoder CUDA Graphs capture failed (%s): %s',
+                                                type(decoder).__name__, e)
+            decoder._enunu_graph_failed = True
+            return None
+        decoder._enunu_step_graph = runner
+    return runner[1]
+
+
+def _downsample(decoder, encoder_outs):
+    """元の forward と同じ reduction_factor による間引き。"""
+    if decoder.reduction_factor > 1:
+        if decoder.conv_downsample is not None:
+            return decoder.conv_downsample(encoder_outs.transpose(1, 2)).transpose(1, 2)
+        return encoder_outs[:, decoder.reduction_factor - 1::decoder.reduction_factor]
+    return encoder_outs
 
 
 def apply_cuda_graphs():
-    """lf0 の自己回帰デコーダーを CUDA Graphs で実行する (推論時・CUDA のみ)。
+    """自己回帰デコーダーを CUDA Graphs で実行する (推論時・CUDA のみ)。
 
+    対象: ResF0NonAttentiveDecoder (lf0) と NonAttentiveDecoder (NPSS 系の mgc / bap など)。
     元の実装は1ステップごとに Python で数十個の演算を呼び、フレーム数/reduction_factor 回ループしていた
-    (3秒のフレーズで約150ステップ)。prenet の dropout はグラフ内でも乱数を使うので、
-    元の実装とは乱数の並びが変わる (同じシードなら毎回同じ結果になる)。
+    (3秒のフレーズで約150ステップ)。prenet の dropout もグラフ内で同じ乱数の並びになり、結果は一致する。
     """
     import torch
     from nnsvs.acoustic_models import tacotron_f0
+    from nnsvs.tacotron import decoder as tacotron_decoder
 
-    cls = tacotron_f0.ResF0NonAttentiveDecoder
-    if getattr(cls, '_enunu_graphed', False):
-        return
-    original_forward = cls.forward
+    def usable(self, encoder_outs, decoder_targets):
+        return (decoder_targets is None and encoder_outs.is_cuda and not torch.is_grad_enabled()
+                and encoder_outs.shape[0] == 1 and not getattr(self, '_enunu_graph_failed', False))
 
-    def forward(self, encoder_outs, in_lens, decoder_targets=None):
-        if (decoder_targets is not None or not encoder_outs.is_cuda or torch.is_grad_enabled()
-                or encoder_outs.shape[0] != 1 or getattr(self, '_enunu_graph_failed', False)):
-            return original_forward(self, encoder_outs, in_lens, decoder_targets)
-        # ループ前の処理は元の forward と同じ
-        lf0_score = encoder_outs[:, :, self.in_lf0_idx].unsqueeze(-1)
-        lf0_score_denorm = (lf0_score * (self.in_lf0_max - self.in_lf0_min) + self.in_lf0_min).transpose(1, 2)
-        if self.reduction_factor > 1:
-            if self.conv_downsample is not None:
-                encoder_outs = self.conv_downsample(encoder_outs.transpose(1, 2)).transpose(1, 2)
-            else:
-                encoder_outs = encoder_outs[:, self.reduction_factor - 1::self.reduction_factor]
-        key = (encoder_outs.shape[2], encoder_outs.device, encoder_outs.dtype)
-        runner = getattr(self, '_enunu_step_graph', None)
-        if runner is None or runner[0] != key:
-            try:
-                runner = (key, _DecoderStepGraph(self, key[0], key[1], key[2]))
-            except Exception as e:  # noqa: BLE001
-                import logging
-                logging.getLogger(__name__).warning('lf0 decoder CUDA Graphs capture failed: %s', e)
-                self._enunu_graph_failed = True
-                return original_forward(self, encoder_outs, in_lens, decoder_targets)
-            self._enunu_step_graph = runner
-        # lf0_score_denorm は reduction_factor 倍の長さ (パディング済み)
-        return runner[1].run(encoder_outs, lf0_score_denorm)
+    res_cls = tacotron_f0.ResF0NonAttentiveDecoder
+    if not getattr(res_cls, '_enunu_graphed', False):
+        original_res = res_cls.forward
 
-    cls.forward = forward
-    cls._enunu_graphed = True
+        def res_forward(self, encoder_outs, in_lens, decoder_targets=None):
+            if not usable(self, encoder_outs, decoder_targets):
+                return original_res(self, encoder_outs, in_lens, decoder_targets)
+            # ループ前の処理は元の forward と同じ
+            lf0_score = encoder_outs[:, :, self.in_lf0_idx].unsqueeze(-1)
+            lf0_score_denorm = (lf0_score * (self.in_lf0_max - self.in_lf0_min) + self.in_lf0_min).transpose(1, 2)
+            downsampled = _downsample(self, encoder_outs)
+            runner = _graph_runner(self, downsampled, residual=True)
+            if runner is None:
+                return original_res(self, encoder_outs, in_lens, decoder_targets)
+            # lf0_score_denorm は reduction_factor 倍の長さ (パディング済み)
+            return runner.run(downsampled, lf0_score_denorm)
+
+        res_cls.forward = res_forward
+        res_cls._enunu_graphed = True
+
+    plain_cls = tacotron_decoder.NonAttentiveDecoder
+    if not getattr(plain_cls, '_enunu_graphed', False):
+        original_plain = plain_cls.forward
+
+        def plain_forward(self, encoder_outs, in_lens, decoder_targets=None):
+            if not usable(self, encoder_outs, decoder_targets):
+                return original_plain(self, encoder_outs, in_lens, decoder_targets)
+            downsampled = _downsample(self, encoder_outs)
+            runner = _graph_runner(self, downsampled, residual=False)
+            if runner is None:
+                return original_plain(self, encoder_outs, in_lens, decoder_targets)
+            return runner.run(downsampled)
+
+        plain_cls.forward = plain_forward
+        plain_cls._enunu_graphed = True
 
 
 def clear_caches():

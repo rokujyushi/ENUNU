@@ -208,6 +208,46 @@ class TestNnsvsSpeedups(unittest.TestCase):
                 self.assertIsInstance(out2, PackedSequence)
                 self.assertEqual(out2.data.shape[0], 80)
 
+    def test_mc2sp_vectorized(self):
+        import pysptk
+        import pysptk.conversion
+        original = pysptk.conversion.mc2sp.__wrapped__   # apply() で差し替えた関数の元
+        rng = np.random.default_rng(1)
+        for dims, fftlen, alpha in ((60, 2048, 0.58), (15, 2048, 0.58), (25, 1024, 0.466)):
+            mc = rng.normal(scale=0.3, size=(40, dims))
+            np.testing.assert_allclose(pysptk.mc2sp(mc, alpha, fftlen), original(mc, alpha, fftlen), rtol=1e-10)
+            np.testing.assert_allclose(pysptk.mc2sp(mc[0], alpha, fftlen), original(mc[0], alpha, fftlen), rtol=1e-10)
+
+    @unittest.skipUnless(__import__('torch').cuda.is_available(), 'CUDA が必要')
+    def test_nonattentive_decoder_graph_matches_eager(self):
+        """自己回帰デコーダーのグラフ版が、同じシードで通常版と完全に一致すること。
+
+        prenet が無い場合は (1, out_dim, rf) のビューに dropout をかけるので、メモリ配置まで合わせないと
+        乱数の割り当てが変わる (rf=2, out_dim=60 で不一致になった不具合の再発防止)。
+        """
+        import torch
+        from enulib import nnsvs_speedups
+        from nnsvs.tacotron.decoder import NonAttentiveDecoder
+        nnsvs_speedups.apply_cuda_graphs()
+        for prenet_layers in (0, 2):
+            for rf in (1, 2):
+                for out_dim in (1, 5, 60):
+                    torch.manual_seed(0)
+                    dec = NonAttentiveDecoder(in_dim=32, out_dim=out_dim, layers=2, hidden_dim=64,
+                                              prenet_layers=prenet_layers, prenet_hidden_dim=16,
+                                              reduction_factor=rf, downsample_by_conv=True).cuda().eval()
+                    x = torch.randn(1, 40 * rf, 32, device='cuda')
+                    with torch.no_grad():
+                        dec._enunu_graph_failed = True
+                        torch.manual_seed(3)
+                        eager = dec(x, [40 * rf])
+                        dec._enunu_graph_failed = False
+                        torch.manual_seed(3)
+                        graphed = dec(x, [40 * rf])
+                    self.assertIsNotNone(getattr(dec, '_enunu_step_graph', None))
+                    torch.testing.assert_close(graphed, eager, rtol=0, atol=0,
+                                               msg=f'prenet={prenet_layers} rf={rf} out_dim={out_dim}')
+
     def test_mcepalpha_cached(self):
         import pysptk.util
         self.assertEqual(pysptk.util.mcepalpha(48000), pysptk.util.mcepalpha.__wrapped__(48000))
