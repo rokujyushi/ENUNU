@@ -2,6 +2,7 @@
 # coding: utf-8
 # fmt: off
 print('Starting enunu server...')
+import gc
 import hashlib
 import json
 import os
@@ -13,6 +14,7 @@ from datetime import datetime
 
 sys.path.append(os.path.dirname(__file__))
 import numpy as np
+import torch
 import enunu
 try:
     import zmq
@@ -303,7 +305,10 @@ def main():
             elif support:
                 if request[3] in engine_dict:
                     engine,duration,request_time = engine_dict[request[3]]
-                    enunu.updete_path(request[1],engine)
+                    enunu.update_path(request[1],engine)
+                    # 使うたびに期限を延ばす (最後に使ってから duration 秒で破棄)
+                    request_time = time.time()
+                    engine_dict[request[3]] = engine,duration,request_time
                 else:
                     duration = int(request[4])
                     engine = enunu.setup(request[1])
@@ -336,8 +341,13 @@ def main():
                     if time.time() - timestamp > duration
             ]
             for key in keys_to_delete:
-                print(key)
+                print(f'release engine: {key}')
                 del engine_dict[key]
+            if keys_to_delete:
+                engine = None
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
         print('Sending response: %s' % response)
         socket.send_string(json.dumps(response))

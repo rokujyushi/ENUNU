@@ -1286,9 +1286,6 @@ def setup(path_plugin: str):
     # 日付時刻を取得
     str_now = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-    # tkinterの親Windowを表示させないようにする
-    root = tkinter.Tk()
-    root.withdraw()
     # 入出力パスを設定する
     if path_ust is not None:
         songname = splitext(basename(path_ust))[0]
@@ -1357,7 +1354,7 @@ def setup(path_plugin: str):
 
     return engine
 
-def updete_path(path_plugin: str,engine: ENUNU):
+def update_path(path_plugin: str,engine: ENUNU):
     # 引用符を削除
     path_plugin = path_plugin.strip('"\'')
     # USTの形式のファイルでなければエラー
@@ -1370,9 +1367,6 @@ def updete_path(path_plugin: str,engine: ENUNU):
     # 日付時刻を取得
     str_now = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-    # tkinterの親Windowを表示させないようにする
-    root = tkinter.Tk()
-    root.withdraw()
     # 入出力パスを設定する
     if path_ust is not None:
         songname = splitext(basename(path_ust))[0]
@@ -1397,6 +1391,10 @@ def updete_path(path_plugin: str,engine: ENUNU):
         raise ValueError("Engine path_ust is None")
 
     return temp_dir
+
+
+# 旧名 (スペルミス)。外部スクリプトから呼ばれている場合のために残す
+updete_path = update_path
 
 # ↑EnunuServerCustom
 
