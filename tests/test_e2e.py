@@ -219,6 +219,28 @@ class ServerE2EBase:
         # lf0 を使い回しても、シード固定により acoustic 単体と同じ結果になる
         self.assertTrue(all(np.array_equal(a, np.asarray(b)) for a, b in zip(alone, after_pitch)))
 
+    def test_lf0_decoder_graph_matches_eager(self):
+        import torch
+        from nnsvs.acoustic_models.tacotron_f0 import ResF0NonAttentiveDecoder
+        decoder = getattr(self.engine.acoustic_model.lf0_model, 'decoder', None)
+        if not (isinstance(decoder, ResF0NonAttentiveDecoder) and torch.cuda.is_available()):
+            self.skipTest('ResF0NonAttentiveDecoder と CUDA が必要')
+        from nnmnkwii.io import hts
+        enunu.update_path(self.tmp_a, self.engine)
+        enunu.run_timing(engine=self.engine, step='acoustic')
+        labels = hts.load(self.engine.path_full_timing).round_()
+        labels.frame_shift = int(self.engine.config.frame_period * 1e4)
+        results = []
+        for eager in (False, True):
+            decoder._enunu_graph_failed = eager   # True なら元の forward を使う
+            try:
+                torch.manual_seed(11)
+                results.append(self.engine.predict_lf0(labels)[0])
+            finally:
+                decoder._enunu_graph_failed = False
+        self.assertIsNotNone(getattr(decoder, '_enunu_step_graph', None))   # グラフ版が使われた
+        np.testing.assert_array_equal(results[0], results[1])
+
     def test_synthe_without_tmp(self):
         # OpenUtau の「選択ノートのキャッシュ削除」は tmp だけを消し、_enutemp は残す
         self.request('acoustic', self.tmp_a)

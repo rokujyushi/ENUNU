@@ -90,6 +90,14 @@ from nnsvs.pitch import lowpass_filter
 from sklearn.preprocessing import MinMaxScaler
 # ↑EnunuServerCustom
 from enulib import enunu2nnsvs  # noqa: E402
+from enulib import nnsvs_speedups  # noqa: E402
+
+# nnsvs / nnmnkwii / pysptk の遅い部分を、結果を変えずに差し替える (ENUNU_NNSVS_SPEEDUPS=0 で無効)
+if os.environ.get('ENUNU_NNSVS_SPEEDUPS', '1') != '0':
+    nnsvs_speedups.apply()
+# lf0 の自己回帰デコーダーを CUDA Graphs で実行する (ENUNU_CUDA_GRAPHS=0 で無効)
+if os.environ.get('ENUNU_CUDA_GRAPHS', '1') != '0':
+    nnsvs_speedups.apply_cuda_graphs()
 
 
 def get_project_path(path_utauplugin):

@@ -144,6 +144,55 @@ class TestEditorF0(unittest.TestCase):
             np.testing.assert_allclose(np.exp(out[1].flatten()), [330, 330, 220, 220, 220], rtol=1e-5)
 
 
+class TestNnsvsSpeedups(unittest.TestCase):
+    """nnsvs_speedups の差し替えが元の関数と同じ結果を返すこと。"""
+
+    def setUp(self):
+        from enulib import nnsvs_speedups
+        from nnmnkwii.frontend import merlin
+        from nnmnkwii.io import hts
+        nnsvs_speedups.apply()
+        nnsvs_speedups.clear_caches()
+        self.merlin = merlin
+        with tempfile.NamedTemporaryFile('w', suffix='.hed', delete=False, encoding='utf-8') as f:
+            f.write('QS "C-Phone_a" {*-a+*}\nQS "C-Phone_Vowel" {*-a+*,*-i+*,*-u+*}\n'
+                    'QS "L-Phone_pau" {pau-*}\nCQS "C-Pos" {/A:(\\d+)_}\n')
+            self.hed = f.name
+        self.binary_dict, self.numeric_dict = hts.load_question_set(self.hed)
+        lines = ['0 500000 xx^pau-a+i/A:1_', '500000 1500000 pau^a-i+u/A:2_', '1500000 2500000 a^i-u+pau/A:3_',
+                 '2500000 3000000 i^u-pau+xx/A:4_']
+        with tempfile.NamedTemporaryFile('w', suffix='.lab', delete=False, encoding='utf-8') as f:
+            f.write('\n'.join(lines) + '\n')
+            self.lab = f.name
+        self.labels = hts.load(self.lab)
+
+    def tearDown(self):
+        os.remove(self.hed)
+        os.remove(self.lab)
+
+    def test_same_as_original(self):
+        m = self.merlin
+        for label in self.labels.contexts:
+            for _ in range(2):   # 2回目はキャッシュから
+                np.testing.assert_array_equal(m.pattern_matching_binary(self.binary_dict, label),
+                                              m.pattern_matching_binary.__wrapped__(self.binary_dict, label))
+                np.testing.assert_array_equal(m.pattern_matching_continous_position(self.numeric_dict, label),
+                                              m.pattern_matching_continous_position.__wrapped__(self.numeric_dict, label))
+        for kwargs in ({'add_frame_features': True, 'frame_shift': 50000},
+                       {'add_frame_features': True, 'frame_shift': 50000, 'subphone_features': 'coarse_coding'},
+                       {'add_frame_features': False}):
+            expected = m.linguistic_features.__wrapped__(self.labels, self.binary_dict, self.numeric_dict, **kwargs)
+            first = m.linguistic_features(self.labels, self.binary_dict, self.numeric_dict, **kwargs)
+            first[:] = -1   # 呼び出し側が書き換えてもキャッシュは壊れない
+            second = m.linguistic_features(self.labels, self.binary_dict, self.numeric_dict, **kwargs)
+            np.testing.assert_array_equal(second, expected)
+
+    def test_mcepalpha_cached(self):
+        import pysptk.util
+        self.assertEqual(pysptk.util.mcepalpha(48000), pysptk.util.mcepalpha.__wrapped__(48000))
+        self.assertGreater(pysptk.util.mcepalpha.cache_info().hits + 1, 0)
+
+
 @unittest.skipUnless(__import__('torch').cuda.is_available(), 'CUDA が必要')
 class TestGraphedDenoiser(unittest.TestCase):
     def test_same_output_as_eager(self):
