@@ -22,7 +22,7 @@
                          "style_shift": true, "pitch_n_frames": true,
                          "diffusion": {"mgc": {"method": "ddim", "steps": 25},
                                        "mel": {"method": "ddim", "steps": 25},
-                                       "bap": {"method": "plms", "steps": 10},
+                                       "bap": {"method": "plms", "steps": 20},
                                        "other": {"method": "ddpm", "steps": 100}}}}}
 ```
 
@@ -32,8 +32,8 @@
 ### 拡散モデルのステップ数と `config` コマンド
 
 拡散モデル（DiffSinger 系の mgc / mel / bap）はサンプリングを間引いて高速化しています。
-既定値は mgc / mel が DDIM 25 ステップ、bap が PLMS 10 ステップです。
-（mgc / mel は 25 ステップの DDIM で、100 ステップとほぼ同じ品質。2026-09-25 に数値比較で確認）
+既定値は mgc / mel が DDIM 25 ステップ、bap が PLMS 20 ステップです。
+（mgc / mel は 25 ステップの DDIM で 100 ステップとほぼ同じ品質。bap は PLMS 10 ステップだとなめらかになりすぎるため 20 ステップ。2026-09-25 に数値比較と試聴で決定）
 
 `method` は `ddpm`（間引きなし）/ `ddim` / `plms` / `eta1` のどれかです。
 設定の優先順位は、`config` コマンド → 環境変数 → 既定値 です。
@@ -47,7 +47,7 @@
 
 ```json
 ["config", {"diffusion": {"steps": 25}}]
-["config", {"diffusion": {"mgc": {"method": "ddim", "steps": 25}, "bap": "plms:10"}}]
+["config", {"diffusion": {"mgc": {"method": "ddim", "steps": 25}, "bap": "plms:20"}}]
 ["config", {"diffusion": {"reset": true}}]
 ```
 

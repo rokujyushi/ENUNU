@@ -1038,11 +1038,12 @@ class ENUNU(SPSVS):
 
 DIFFUSION_STREAMS = ('mgc', 'mel', 'bap')
 DIFFUSION_METHODS = ('ddpm', 'ddim', 'plms', 'eta1')
-# 既定値。mgc / mel は DDIM 25 ステップで 100 ステップとほぼ同等の品質 (2026-09-25 検証)。
+# 既定値。mgc / mel は DDIM 25 ステップで 100 ステップとほぼ同等の品質、
+# bap は PLMS 10 ステップだとなめらかになりすぎるため 20 ステップ (いずれも 2026-09-25 に数値比較・試聴で決定)。
 DEFAULT_DIFFUSION = {
     'mgc': {'method': 'ddim', 'steps': 25},
     'mel': {'method': 'ddim', 'steps': 25},
-    'bap': {'method': 'plms', 'steps': 10},
+    'bap': {'method': 'plms', 'steps': 20},
     'other': {'method': 'ddpm', 'steps': 100},
 }
 # config コマンドで変更された設定 (None なら環境変数・既定値)
@@ -1107,7 +1108,7 @@ def set_diffusion_settings(request: dict) -> dict:
     """config コマンドの diffusion 設定を検証して反映し、反映後の設定を返す。
 
     request 例: {'steps': 25}  (mgc と mel のステップ数だけ変える)
-               {'mgc': {'method': 'ddim', 'steps': 25}, 'bap': 'plms:10'}
+               {'mgc': {'method': 'ddim', 'steps': 25}, 'bap': 'plms:20'}
                {'reset': True}  (環境変数・既定値に戻す)
     """
     global _diffusion_override
