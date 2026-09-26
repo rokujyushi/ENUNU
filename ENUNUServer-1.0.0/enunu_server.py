@@ -79,7 +79,7 @@ def npy_paths(engine: enunu.ENUNU):
 
 def timing(engine: enunu.ENUNU):
     print('timing: start')
-    enunu.run_timing(engine=engine,)
+    enunu.run_timing(engine)
 
     for path in (engine.path_full_timing, engine.path_mono_timing):
         if path is None or not os.path.isfile(path):
@@ -96,7 +96,7 @@ def run_acoustic_pipeline(engine: enunu.ENUNU, style_shift, digest, editor_f0=No
         kind, extra = 'acoustic', {}
     else:
         kind, extra = 'acoustic_f0', {'editor_f0': cache.array_digest(editor_f0)}
-    enunu.run_timing(engine=engine,step='acoustic')
+    enunu.run_score_as_timing(engine)
     seed_rng(engine, digest, style_shift)
     enunu.run_acoustic(engine=engine,editor_f0=editor_f0,style_shift=style_shift,
                        lf0_base=cache.cached_pitch_lf0(engine, digest, style_shift))
@@ -128,7 +128,7 @@ def pitch(engine: enunu.ENUNU, style_shift=0):
         print('pitch: use cached pitch_f0.npy')
         f0 = np.load(engine.path_pitch_npy)
     else:
-        enunu.run_timing(engine=engine,step='acoustic')
+        enunu.run_score_as_timing(engine)
         seed_rng(engine, digest, style_shift)
         engine.last_lf0_raw = None
         f0 = enunu.run_pitch(engine=engine,style_shift=style_shift)

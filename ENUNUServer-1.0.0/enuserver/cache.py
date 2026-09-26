@@ -16,7 +16,7 @@ from enuserver import diffusion
 def ust_digest(engine):
     """このリクエストの UST (一時フォルダに複製した直後の内容) のハッシュ。
 
-    run_timing が temp.ust を書き換えるので、各コマンドの先頭で呼ぶこと。
+    run_timing / run_score_as_timing が temp.ust を書き換えるので、各コマンドの先頭で呼ぶこと。
     """
     with open(engine.path_ust, 'rb') as f:
         return hashlib.sha1(f.read()).hexdigest()

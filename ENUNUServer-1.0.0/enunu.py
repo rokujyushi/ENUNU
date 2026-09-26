@@ -80,7 +80,6 @@ import nnsvs  # noqa: E402
 from nnsvs.svs import SPSVS  # noqa: E402
 # ↓EnunuServerCustom
 from nnsvs.gen import gen_world_params
-import pyworld
 from nnmnkwii.frontend import merlin as fe
 from nnmnkwii.preprocessing.f0 import interp1d
 from nnsvs.base import PredictionType
@@ -249,7 +248,6 @@ class ENUNU(SPSVS):
         self.path_features_npz = None
         self.path_editorf0_npy = None
         self.path_question = None
-        self.start_time = None
         # 拡散モデルのサンプリングを間引いて高速化する (設定は enuserver.diffusion を参照)
         self.apply_diffusion_settings(diffusion.diffusion_settings())
 # ↑EnunuServerCustom
@@ -446,20 +444,11 @@ class ENUNU(SPSVS):
             return multistream_features
 
         # ツールが指定されている場合はCSV書き出し (%.9g: float32 の値は損なわず、%.16f の約半分の時間)
-        if feature_type == 'world':
-            mgc, lf0, vuv, bap = multistream_features
-            f0 = np.exp(lf0)
-            np.savetxt(self.path_mgc, mgc, fmt='%.9g', delimiter=',')
-            np.savetxt(self.path_f0, f0, fmt='%.9g', delimiter=',')
-            np.savetxt(self.path_vuv, vuv, fmt='%.9g', delimiter=',')
-            np.savetxt(self.path_bap, bap, fmt='%.9g', delimiter=',')
-        elif feature_type == 'melf0':
-            mgc, lf0, vuv = multistream_features
-            f0 = np.exp(lf0)
-            # CSV書き出し
-            np.savetxt(self.path_mgc, mgc, fmt='%.9g', delimiter=',')
-            np.savetxt(self.path_f0, f0, fmt='%.9g', delimiter=',')
-            np.savetxt(self.path_vuv, vuv, fmt='%.9g', delimiter=',')
+        # world は (mgc, lf0, vuv, bap)、melf0 は (mel, lf0, vuv)。mel も acoustic_mgc.csv に書く。lf0 は f0 [Hz] にして書く
+        paths = (self.path_mgc, self.path_f0, self.path_vuv, self.path_bap)[:len(multistream_features)]
+        lf0 = multistream_features[1]
+        for path, array in zip(paths, multistream_features):
+            np.savetxt(path, np.exp(lf0) if path == self.path_f0 else array, fmt='%.9g', delimiter=',')
 
         # 書き出した内容のハッシュ (拡張機能が書き換えなかったファイルは読み直さない)
         def file_digest(path):
@@ -514,21 +503,12 @@ class ENUNU(SPSVS):
             edited = np.log(np.loadtxt(self.path_f0, delimiter=',', dtype=np.float64, ndmin=1))
             return align(self.path_f0, edited, np.asarray(lf0).reshape(-1, 1))
 
-        if feature_type == 'world':
-            mgc = reload(self.path_mgc, mgc)
-            lf0 = reload_lf0()
-            vuv = reload(self.path_vuv, vuv).reshape(-1, 1)
-            bap = reload(self.path_bap, bap)
-            # 統合
-            multistream_features = (mgc, lf0, vuv, bap)
-        elif feature_type == 'melf0':
-            mgc = reload(self.path_mgc, mgc)
-            lf0 = reload_lf0()
-            vuv = reload(self.path_vuv, vuv).reshape(-1, 1)
-            # 統合
-            multistream_features = (mgc, lf0, vuv)
-        else:
-            raise Exception('Unexpected Error')
+        multistream_features = tuple(
+            reload_lf0() if path == self.path_f0
+            else reload(path, array).reshape(-1, 1) if path == self.path_vuv
+            else reload(path, array)
+            for path, array in zip(paths, multistream_features)
+        )
         # ↓EnunuServerCustom
         for path in (self.path_mgc, self.path_f0, self.path_vuv,self.path_bap):
             if exists(path):
@@ -538,27 +518,12 @@ class ENUNU(SPSVS):
 
 # ↓EnunuServerCustom
 
-    def svs_timing(
-        self,
-        labels,
-        vocoder_type='world',
-        post_filter_type='gv',
-        **kwargs
-    ):
-        """Synthesize waveform from HTS labels.
+    def svs_timing(self, labels):
+        """楽譜のフルラベルからタイミングを推定し、mono_score / mono_timing / full_timing を書き出す。
+
         Args:
             labels (nnmnkwii.io.hts.HTSLabelFile): HTS labels
-            vocoder_type (str): Vocoder type. One of ``world``, ``pwg`` or ``usfgan``.
-                If ``auto`` is specified, the vocoder is automatically selected.
-            post_filter_type (str): Post-filter type. ``merlin``, ``gv`` or ``nnsvs``
-                is supported.
         """
-        self.start_time = time.time()
-        vocoder_type = vocoder_type.lower()
-        if vocoder_type not in ["world", "pwg", "usfgan", "auto"]:
-            raise ValueError(f"Unknown vocoder type: {vocoder_type}")
-        if post_filter_type not in ["merlin", "nnsvs", "gv", "none"]:
-            raise ValueError(f"Unknown post-filter type: {post_filter_type}")
         # Predict timinigs
         duration_modified_labels = self.predict_timing(labels)
         # NOTE: ここにタイミング補正のための割り込み処理を追加-----------
@@ -579,7 +544,6 @@ class ENUNU(SPSVS):
     
     def svs_acoustic(
         self,
-        vocoder_type='world',
         post_filter_type='gv',
         trajectory_smoothing=True,
         trajectory_smoothing_cutoff=50,
@@ -589,13 +553,9 @@ class ENUNU(SPSVS):
         fill_silence_to_rest=False,
         editor_f0=None,
         lf0_base=None,
-        **kwargs
     ):
-        """Synthesize waveform from HTS labels.
+        """full_timing から音響特徴量を推論し、拡張機能で編集して multistream_features に入れる。
         Args:
-            labels (nnmnkwii.io.hts.HTSLabelFile): HTS labels
-            vocoder_type (str): Vocoder type. One of ``world``, ``pwg`` or ``usfgan``.
-                If ``auto`` is specified, the vocoder is automatically selected.
             post_filter_type (str): Post-filter type. ``merlin``, ``gv`` or ``nnsvs``
                 is supported.
             trajectory_smoothing (bool): Whether to smooth acoustic feature trajectory.
@@ -611,16 +571,10 @@ class ENUNU(SPSVS):
             lf0_base (ndarray): pitch コマンドで得た lf0_model の生の出力 (last_lf0_raw)。
                 指定すると lf0_model を実行せずにこれを使う。
         """
-        if(self.start_time == None):
-            self.start_time = time.time()
-        vocoder_type = vocoder_type.lower()
-        if vocoder_type not in ["world", "pwg", "usfgan", "auto"]:
-            raise ValueError(f"Unknown vocoder type: {vocoder_type}")
         if post_filter_type not in ["merlin", "nnsvs", "gv", "none"]:
             raise ValueError(f"Unknown post-filter type: {post_filter_type}")
         # 編集後のfull_timing を読み取る
         duration_modified_labels = hts.load(self.path_full_timing).round_()
-        # Run acoustic model and vocoder
         hts_frame_shift = int(self.config.frame_period * 1e4)
         duration_modified_labels.frame_shift = hts_frame_shift
 
@@ -657,6 +611,7 @@ class ENUNU(SPSVS):
         self.multistream_features = self.postprocess_acoustic(
             acoustic_features=acoustic_features,
             duration_modified_labels=duration_modified_labels,
+            post_filter_type=post_filter_type,
             trajectory_smoothing=trajectory_smoothing,
             trajectory_smoothing_cutoff=trajectory_smoothing_cutoff,
             trajectory_smoothing_cutoff_f0=trajectory_smoothing_cutoff_f0,
@@ -801,7 +756,6 @@ class ENUNU(SPSVS):
         style_shift=0,
         trajectory_smoothing=True,
         trajectory_smoothing_cutoff_f0=20,
-        **kwargs
     ):
         """ピッチ (F0 [Hz]) だけを推定して path_pitch_npy に保存する。
 
@@ -822,7 +776,7 @@ class ENUNU(SPSVS):
             f0 = np.exp(lf0)
             f0[rest] = 0
         else:
-            self.svs_acoustic(style_shift=style_shift, force_fix_vuv=True, **kwargs)
+            self.svs_acoustic(style_shift=style_shift, force_fix_vuv=True)
             _, lf0, vuv = self.multistream_features[:3]
             lf0, vuv = lf0.flatten(), vuv.flatten()
             f0 = np.where(lf0 > 0, np.exp(lf0), 0)
@@ -832,26 +786,11 @@ class ENUNU(SPSVS):
         logger.info(f'Elapsed time for pitch prediction: {time.time() - start_time:.3f} sec')
         return f0
 
-    def svs_npy(
-        self,
-        vocoder_type='world',
-        vuv_threshold=0.5,
-        kind='linear',
-        **kwargs
-        ):
-        """Synthesize waveform from HTS labels.
-        Args:
-            vocoder_type (str): Vocoder type. One of ``world``, ``pwg`` or ``usfgan``.
-                If ``auto`` is specified, the vocoder is automatically selected.
-            vuv_threshold (float): Threshold for VUV.
-            kind (str):
+    def svs_npy(self, vuv_threshold=0.5):
+        """multistream_features から、クライアントが読む npy (f0 / mel / vuv / spectrogram / aperiodicity) を書き出す。
+
+        spectrogram / aperiodicity は OpenUtau が自分で WORLD 合成する音源だけに作る (client_reads_world_params)。
         """
-        if(self.start_time == None):
-            self.start_time = time.time()
-        vocoder_type = vocoder_type.lower()
-        if vocoder_type not in ["world", "pwg", "usfgan", "auto"]:
-            raise ValueError(f"Unknown vocoder type: {vocoder_type}")
-        
         def f0_from_lf0(lf0, vuv):
             # gen_world_params と同じ計算
             f0 = lf0.copy()
@@ -859,8 +798,10 @@ class ENUNU(SPSVS):
             f0[vuv < vuv_threshold] = 0
             return f0.flatten()
 
-        data,f0, spectrogram, aperiodicity, mel, vuv = None,None,None,None,None,None
-        if self.multistream_features is not None and len(self.multistream_features) >= 4:
+        if self.multistream_features is None:
+            raise RuntimeError('acoustic features have not been generated')
+        f0, spectrogram, aperiodicity, mel, vuv = None, None, None, None, None
+        if len(self.multistream_features) == 4:
             mgc, lf0, vuv, bap = self.multistream_features
             if self.client_reads_world_params():
                 # Generate WORLD parameters
@@ -873,70 +814,45 @@ class ENUNU(SPSVS):
                 for path in (self.path_spectrogram_npy, self.path_aperiodicity_npy):
                     if path is not None and exists(path):
                         remove(path)
-        elif self.multistream_features is not None and len(self.multistream_features) == 3:
+        else:
             mel, lf0, vuv = self.multistream_features
             f0 = f0_from_lf0(lf0, vuv)
-        else:
-            data = self.predict_waveform(
-                multistream_features=self.multistream_features,
-                vocoder_type=vocoder_type,
-                vuv_threshold=vuv_threshold,
-            )
-            data = data.astype(np.double)
-            # Generate WAV to WORLD parameters
-            f0, spectrogram, aperiodicity = pyworld.wav2world(data, self.config.sample_rate)
-            f0 = self.interp1d(f0=f0,kind=kind)
 
         # npyとしてparameterの行列を出力
         for path, array, strtype in (
-            (self.path_f0_npy, f0.astype(np.float64) if not f0 is None else None, 'f0'),
-            (self.path_mel_npy, mel.astype(np.float64) if not mel is None else None, 'mel'),
-            (self.path_vuv_npy, vuv.astype(np.float64) if not vuv is None else None, 'vuv'),
-            (self.path_spectrogram_npy, spectrogram.astype(np.float64) if not spectrogram is None else None, 'spectrogram'),
-            (self.path_aperiodicity_npy, aperiodicity.astype(np.float64) if not aperiodicity is None else None, 'aperiodicity'),
+            (self.path_f0_npy, f0, 'f0'),
+            (self.path_mel_npy, mel, 'mel'),
+            (self.path_vuv_npy, vuv, 'vuv'),
+            (self.path_spectrogram_npy, spectrogram, 'spectrogram'),
+            (self.path_aperiodicity_npy, aperiodicity, 'aperiodicity'),
         ):
             if array is not None and path is not None:
                 print(f'save {strtype}.npy')
-                np.save(path, array)
+                np.save(path, array.astype(np.float64))
 
-        if(self.start_time != None):
-            logger.info(f"Total time: {time.time() - self.start_time:.3f} sec")
-            RT = (time.time() - self.start_time) / (len(f0) / self.config.sample_rate)
-            logger.info(f"Total real-time factor: {RT:.3f}")
-
-
-    
     def svs_synthe(
         self,
         vocoder_type='world',
-        post_filter_type='gv',
         vuv_threshold=0.5,
         dtype=np.int16,
         peak_norm=False,
         loudness_norm=False,
         target_loudness=-20,
-        **kwargs
     ):
-        """Synthesize waveform from HTS labels.
+        """multistream_features からボコーダで波形を生成する。
         Args:
             vocoder_type (str): Vocoder type. One of ``world``, ``pwg`` or ``usfgan``.
                 If ``auto`` is specified, the vocoder is automatically selected.
-            post_filter_type (str): Post-filter type. ``merlin``, ``gv`` or ``nnsvs``
-                is supported.
             vuv_threshold (float): Threshold for VUV.
             dtype (np.dtype): Data type of the output waveform.
             peak_norm (bool): Whether to normalize the waveform by peak value.
             loudness_norm (bool): Whether to normalize the waveform by loudness.
             target_loudness (float): Target loudness in dB.
         """
-        if(self.start_time == None):
-            self.start_time = time.time()
+        start_time = time.time()
         vocoder_type = vocoder_type.lower()
         if vocoder_type not in ['world', 'pwg', 'usfgan', 'auto']:
             raise ValueError(f'Unknown vocoder type: {vocoder_type}')
-        if post_filter_type not in ["merlin", "nnsvs", "gv", "none"]:
-            raise ValueError(f"Unknown post-filter type: {post_filter_type}")
-        
 
         # Generate waveform by vocoder
         # ニューラルボコーダは計算量が律速なので fp16 で動かす (HN-uSFGAN で約1.5倍速、fp32 との SNR 54〜60 dB)。
@@ -965,10 +881,9 @@ class ENUNU(SPSVS):
             target_loudness=target_loudness,
         )
 
-
-        logger.info(f"Total time: {time.time() - self.start_time:.3f} sec")
-        RT = (time.time() - self.start_time) / (len(wav) / self.config.sample_rate)
-        logger.info(f"Total real-time factor: {RT:.3f}")
+        elapsed = time.time() - start_time
+        logger.info(f'Elapsed time for waveform generation: {elapsed:.3f} sec '
+                    f'(real-time factor: {elapsed / (len(wav) / self.config.sample_rate):.3f})')
         return wav, self.config.sample_rate
 
 # ↑EnunuServerCustom
@@ -1120,8 +1035,8 @@ class ENUNU(SPSVS):
 
 # ↓EnunuServerCustom
 
-def run_timing(engine: ENUNU,step=None):
-
+def _write_score(engine: ENUNU):
+    """UST を拡張機能で編集し、楽譜のフルラベル (score.full) に変換する。"""
     # USTファイルを編集する
     ust = utaupy.ust.load(engine.path_ust)
     ust = engine.edit_ust(ust)
@@ -1136,73 +1051,58 @@ def run_timing(engine: ENUNU,step=None):
         strict_sinsy_style=False,
     )
 
-    
-    if step is None:
-        # フルラベルファイルを読み取る
-        logging.info('Loading LAB')
-        labels = hts.load(engine.path_full_score)
 
-        # LABファイルを編集する。
-        labels = engine.edit_score(labels)
+def run_timing(engine: ENUNU):
+    """timing コマンド: 楽譜からタイミングを推定して full_timing / mono_timing を書き出す。"""
+    _write_score(engine)
 
-        engine.svs_timing(
-            labels=labels,
-            dtype=np.float32,
-            vocoder_type='auto',
-            post_filter_type='gv',
-            force_fix_vuv=True,
-            segmented_synthesis=True,
-        )
-        duration_modified_labels = hts.load(engine.path_full_timing).round_()
-        duration_modified_labels = engine.edit_timing(duration_modified_labels)
-    else:
-        engine.path_full_timing = engine.path_full_score
-        duration_modified_labels = hts.load(engine.path_full_timing).round_()
-        with open(engine.path_mono_timing, 'w', encoding='utf-8') as f:
-            f.write(str(nnsvs.io.hts.full_to_mono(duration_modified_labels)))
-        duration_modified_labels = engine.edit_timing(duration_modified_labels,"timing_editor_2")
+    # フルラベルファイルを読み取る
+    logging.info('Loading LAB')
+    labels = hts.load(engine.path_full_score)
 
-def run_acoustic(engine: ENUNU,kind='linear',editor_f0=None,style_shift=0,lf0_base=None):
+    # LABファイルを編集する。
+    labels = engine.edit_score(labels)
+
+    engine.svs_timing(labels)
+    duration_modified_labels = hts.load(engine.path_full_timing).round_()
+    engine.edit_timing(duration_modified_labels)
+
+
+def run_score_as_timing(engine: ENUNU):
+    """acoustic 系のコマンド: OpenUtau はタイミングを決めた UST を送るので、楽譜をそのままタイミングとして使う。
+
+    full_timing は score.full を指すようにする (次のリクエストの update_path で元に戻る)。
+    拡張機能は timing_editor ではなく timing_editor_2 を使う。
+    """
+    _write_score(engine)
+    engine.path_full_timing = engine.path_full_score
+    duration_modified_labels = hts.load(engine.path_full_timing).round_()
+    with open(engine.path_mono_timing, 'w', encoding='utf-8') as f:
+        f.write(str(nnsvs.io.hts.full_to_mono(duration_modified_labels)))
+    engine.edit_timing(duration_modified_labels, "timing_editor_2")
+
+
+def run_acoustic(engine: ENUNU,editor_f0=None,style_shift=0,lf0_base=None):
     engine.svs_acoustic(
-            dtype=np.float32,
-            vocoder_type='auto',
             post_filter_type='gv',
             force_fix_vuv=True,
-            segmented_synthesis=False,
-            kind=kind,
             editor_f0=editor_f0,
             style_shift=style_shift,
             lf0_base=lf0_base,
         )
 
 def run_pitch(engine: ENUNU,style_shift=0):
-    return engine.svs_pitch(
-            style_shift=style_shift,
-            vocoder_type='auto',
-            post_filter_type='gv',
-        )
+    return engine.svs_pitch(style_shift=style_shift)
 
 
-def run_npy(engine: ENUNU,kind='linear'):
-    print(f'{datetime.now()} : pitch interpolation mode : {kind}')
-    engine.svs_npy(
-            vocoder_type='auto',
-            kind=kind,
-        )
+def run_npy(engine: ENUNU):
+    engine.svs_npy()
 
 def run_synthesizer(out_wav_path: str,engine: ENUNU):
-    
-    # フルラベルファイルを読み取る
-    logging.info('Loading LAB')
-    labels = hts.load(engine.path_full_score)
-
     # WAVファイル出力
     wav_data,sample_rate = engine.svs_synthe(
-        labels=labels,
         dtype=np.int16,
         vocoder_type='auto',
-        post_filter_type='gv',
-        force_fix_vuv=True,
     )
 
     wav_data = adjust_wav_gain_for_float32(wav_data)
@@ -1294,9 +1194,6 @@ def update_path(path_plugin: str,engine: ENUNU):
         shutil.copy2(path_plugin, engine.path_ust)
     return temp_dir
 
-
-# 旧名 (スペルミス)。外部スクリプトから呼ばれている場合のために残す
-updete_path = update_path
 
 # ↑EnunuServerCustom
 

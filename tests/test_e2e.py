@@ -236,7 +236,7 @@ class ServerE2EBase:
             self.skipTest('ResF0NonAttentiveDecoder と CUDA が必要')
         from nnmnkwii.io import hts
         enunu.update_path(self.tmp_a, self.engine)
-        enunu.run_timing(engine=self.engine, step='acoustic')
+        enunu.run_score_as_timing(self.engine)
         labels = hts.load(self.engine.path_full_timing).round_()
         labels.frame_shift = int(self.engine.config.frame_period * 1e4)
         results = []

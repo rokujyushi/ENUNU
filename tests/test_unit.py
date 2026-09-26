@@ -171,7 +171,6 @@ class TestWorldParamsOnlyWhenRead(unittest.TestCase):
         e.path_aperiodicity_npy = os.path.join(tmp, 'aperiodicity.npy')
         e.config = OmegaConf.create({'sample_rate': 48000, 'use_world_codec': False,
                                      'extensions': {'wav_synthesizer': wav_synthesizer}})
-        e.start_time = None
         e.interp1d = None
         for name in ('get_extension_path_list', 'client_reads_world_params', 'svs_npy'):
             setattr(e, name, types.MethodType(getattr(enunu.ENUNU, name), e))
