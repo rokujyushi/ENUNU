@@ -224,7 +224,6 @@ class _DecoderStepGraph:
     def _step(self):
         """元の forward のループ本体 (推論時) と同じ計算。状態は静的バッファに書き戻す。"""
         import torch
-        import torch.nn.functional as F
         d = self.decoder
         if self.external_noise:
             prenet_out = self.prenet_in   # run() でグラフの外で計算して入れる

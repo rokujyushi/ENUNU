@@ -13,6 +13,7 @@ import numpy as np
 
 import _common
 import enunu
+from enuserver import cache, diffusion
 import enunu_server as S
 
 VOICES = _common.test_voices()
@@ -76,7 +77,7 @@ class ServerE2EBase:
     @classmethod
     def tearDownClass(cls):
         os.chdir(cls.cwd)
-        enunu.set_diffusion_settings({'reset': True})
+        diffusion.set_diffusion_settings({'reset': True})
         shutil.rmtree(cls.work, ignore_errors=True)
 
     def setUp(self):
@@ -151,12 +152,12 @@ class ServerE2EBase:
             self.request('acoustic', self.tmp_a)
             self.request('acoustic', self.tmp_a, 2)
             self.assertEqual(c.acoustic, 2)
-            S.config({'diffusion': {'steps': 10}}, {'x': (self.engine, 600, 0)})
+            S.config({'diffusion': {'steps': 10}}, [self.engine])
             try:
                 self.request('acoustic', self.tmp_a, 2)
                 self.assertEqual(c.acoustic, 3)
             finally:
-                S.config({'diffusion': {'reset': True}}, {'x': (self.engine, 600, 0)})
+                S.config({'diffusion': {'reset': True}}, [self.engine])
 
     def test_pitch_and_acoustic_f0_cache(self):
         with Counter() as c:
@@ -182,7 +183,7 @@ class ServerE2EBase:
 
     def clear_work_caches(self):
         for path in (self.engine.path_features_npz, self.engine.path_pitch_npy, self.engine.path_pitch_lf0_npy,
-                     S.pitch_meta_path(self.engine)):
+                     cache.pitch_meta_path(self.engine)):
             if os.path.isfile(path):
                 os.remove(path)
         self.engine.multistream_features = None

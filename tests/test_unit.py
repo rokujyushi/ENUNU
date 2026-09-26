@@ -11,6 +11,7 @@ import numpy as np
 
 import _common  # noqa: F401  (sys.path の設定)
 import enunu
+from enuserver import cache, diffusion, postfilter
 import enunu_server as S
 from enulib.extensions import run_extension
 
@@ -41,60 +42,60 @@ class TestParseStyleShift(unittest.TestCase):
 
 class TestDiffusionSettings(unittest.TestCase):
     def tearDown(self):
-        enunu.set_diffusion_settings({'reset': True})
+        diffusion.set_diffusion_settings({'reset': True})
 
     def test_default(self):
         with clean_env():
-            self.assertEqual(brief(enunu.diffusion_settings()),
+            self.assertEqual(brief(diffusion.diffusion_settings()),
                              {'mgc': 'ddim:25', 'mel': 'ddim:25', 'bap': 'plms:20', 'other': 'ddpm:100'})
 
     def test_legacy_env(self):
         with clean_env(ENUNU_DIFFUSION_TARGETS='all', ENUNU_DIFFUSION_METHOD='eta1'):
-            self.assertEqual(brief(enunu.diffusion_settings()),
+            self.assertEqual(brief(diffusion.diffusion_settings()),
                              {'mgc': 'eta1:10', 'mel': 'eta1:10', 'bap': 'eta1:10', 'other': 'ddpm:100'})
         with clean_env(ENUNU_DIFFUSION_SPEEDUP='1'):
-            self.assertTrue(all(v['method'] == 'ddpm' for v in enunu.diffusion_settings().values()))
+            self.assertTrue(all(v['method'] == 'ddpm' for v in diffusion.diffusion_settings().values()))
         with clean_env(ENUNU_DIFFUSION_SPEEDUP='5'):  # TARGETS 省略時は従来どおり bap のみ
-            self.assertEqual(brief(enunu.diffusion_settings())['bap'], 'plms:20')
-            self.assertEqual(brief(enunu.diffusion_settings())['mgc'], 'ddpm:100')
+            self.assertEqual(brief(diffusion.diffusion_settings())['bap'], 'plms:20')
+            self.assertEqual(brief(diffusion.diffusion_settings())['mgc'], 'ddpm:100')
 
     def test_stream_env(self):
         with clean_env(ENUNU_DIFFUSION_MEL='ddim:20', ENUNU_DIFFUSION_MGC='50', ENUNU_DIFFUSION_BAP='foo:3'):
-            b = brief(enunu.diffusion_settings())
+            b = brief(diffusion.diffusion_settings())
             self.assertEqual(b['mel'], 'ddim:20')
             self.assertEqual(b['mgc'], 'ddim:50')   # 数字だけならステップ数だけ変える
             self.assertEqual(b['bap'], 'plms:20')   # 不正値は無視
 
     def test_config(self):
         with clean_env():
-            self.assertEqual(brief(enunu.set_diffusion_settings({'steps': 10}))['mgc'], 'ddim:10')
-            self.assertEqual(brief(enunu.diffusion_settings())['mel'], 'ddim:10')
-            enunu.set_diffusion_settings({'bap': 'ddpm', 'mgc': {'method': 'eta1'}})
-            b = brief(enunu.diffusion_settings())
+            self.assertEqual(brief(diffusion.set_diffusion_settings({'steps': 10}))['mgc'], 'ddim:10')
+            self.assertEqual(brief(diffusion.diffusion_settings())['mel'], 'ddim:10')
+            diffusion.set_diffusion_settings({'bap': 'ddpm', 'mgc': {'method': 'eta1'}})
+            b = brief(diffusion.diffusion_settings())
             self.assertEqual((b['mgc'], b['bap'][:4]), ('eta1:10', 'ddpm'))
             for bad in ({'steps': 0}, {'steps': 'x'}, {'steps': True}, {'mgc': 'foo:10'}):
                 with self.assertRaises((ValueError, TypeError), msg=bad):
-                    enunu.set_diffusion_settings(bad)
-            self.assertEqual(brief(enunu.diffusion_settings())['mgc'], 'eta1:10')  # 不正値では変わらない
-            enunu.set_diffusion_settings({'reset': True})
-            self.assertEqual(brief(enunu.diffusion_settings())['mgc'], 'ddim:25')
+                    diffusion.set_diffusion_settings(bad)
+            self.assertEqual(brief(diffusion.diffusion_settings())['mgc'], 'eta1:10')  # 不正値では変わらない
+            diffusion.set_diffusion_settings({'reset': True})
+            self.assertEqual(brief(diffusion.diffusion_settings())['mgc'], 'ddim:25')
 
     def test_config_reset_with_streams(self):
         # reset と一緒に来た指定は、既定値から始めて反映する (前に送った mgc の指定は残らない)
         with clean_env():
-            enunu.set_diffusion_settings({'mgc': 'eta1:10'})
-            b = brief(enunu.set_diffusion_settings({'reset': True, 'bap': {'steps': 30}}))
+            diffusion.set_diffusion_settings({'mgc': 'eta1:10'})
+            b = brief(diffusion.set_diffusion_settings({'reset': True, 'bap': {'steps': 30}}))
             self.assertEqual((b['mgc'], b['mel'], b['bap']), ('ddim:25', 'ddim:25', 'plms:30'))
             # OpenUtau の「モデルの設定に従う」 (間引きなし)
-            b = brief(enunu.set_diffusion_settings({'reset': True, 'mgc': 'ddpm', 'mel': 'ddpm', 'bap': 'ddpm'}))
+            b = brief(diffusion.set_diffusion_settings({'reset': True, 'mgc': 'ddpm', 'mel': 'ddpm', 'bap': 'ddpm'}))
             self.assertEqual({b[k][:4] for k in ('mgc', 'mel', 'bap')}, {'ddpm'})
             # 不正な値なら何も変えない
             with self.assertRaises(ValueError):
-                enunu.set_diffusion_settings({'reset': True, 'bap': 'foo:3'})
-            self.assertEqual(brief(enunu.diffusion_settings())['bap'][:4], 'ddpm')
+                diffusion.set_diffusion_settings({'reset': True, 'bap': 'foo:3'})
+            self.assertEqual(brief(diffusion.diffusion_settings())['bap'][:4], 'ddpm')
         # 環境変数の値も reset の起点になる
         with clean_env(ENUNU_DIFFUSION_MGC='ddim:40'):
-            b = brief(enunu.set_diffusion_settings({'reset': True, 'bap': {'steps': 30}}))
+            b = brief(diffusion.set_diffusion_settings({'reset': True, 'bap': {'steps': 30}}))
             self.assertEqual(b['mgc'], 'ddim:40')
 
 
@@ -116,19 +117,19 @@ class TestFeatureCache(unittest.TestCase):
             rng = np.random.default_rng(0)
             e.multistream_features = (rng.normal(size=(50, 60)), rng.normal(size=(50, 1)),
                                       rng.uniform(size=(50, 1)), rng.normal(size=(50, 5)))
-            S.save_features(e, 'acoustic', 2, 'digest')
-            features, meta = S.load_features(e)
+            cache.save_features(e, 'acoustic', 2, 'digest')
+            features, meta = cache.load_features(e)
             self.assertTrue(all(np.array_equal(a, b) for a, b in zip(e.multistream_features, features)))
-            self.assertEqual(meta, S.features_meta(e, 'acoustic', 2, 'digest'))
+            self.assertEqual(meta, cache.features_meta(e, 'acoustic', 2, 'digest'))
             e.feature_type = 'melf0'   # 別形式のキャッシュは使わない
-            self.assertEqual(S.load_features(e), (None, None))
+            self.assertEqual(cache.load_features(e), (None, None))
 
     def test_broken_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             e = fake_engine(tmp)
             with open(e.path_features_npz, 'wb') as f:
                 f.write(b'not a npz')
-            self.assertEqual(S.load_features(e), (None, None))
+            self.assertEqual(cache.load_features(e), (None, None))
 
     def test_legacy_melf0(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -137,7 +138,7 @@ class TestFeatureCache(unittest.TestCase):
             np.save(e.path_f0_npy, f0)
             np.save(e.path_mel_npy, np.zeros((6, 80)))
             np.save(e.path_vuv_npy, (f0 > 0).astype(np.float64))
-            mel, lf0, vuv = S.load_legacy_melf0(e)
+            mel, lf0, vuv = cache.load_legacy_melf0(e)
             self.assertEqual(lf0.shape, (6, 1))
             # 無声区間は補間された連続値 (端は最近傍)
             np.testing.assert_allclose(np.exp(lf0.flatten()), [200, 200, 200, np.sqrt(200 * 400), 400, 400])
@@ -149,14 +150,14 @@ class TestEditorF0(unittest.TestCase):
             e = fake_engine(tmp)
             lf0 = np.log(np.full((5, 1), 220.0)).astype(np.float32)
             features = (np.zeros((5, 3)), lf0, np.ones((5, 1)))
-            self.assertIs(S.apply_editor_f0(e, features), features)   # ファイルが無ければそのまま
+            self.assertIs(cache.apply_editor_f0(e, features), features)   # ファイルが無ければそのまま
             np.save(e.path_editorf0_npy, np.array([0, 440, 440, 0, 110], dtype=np.float64))
-            out = S.apply_editor_f0(e, features)
+            out = cache.apply_editor_f0(e, features)
             np.testing.assert_allclose(np.exp(out[1].flatten()), [220, 440, 440, 220, 110], rtol=1e-5)
             self.assertEqual(out[1].dtype, np.float32)
             # フレーム数が違うときは重なる範囲だけ
             np.save(e.path_editorf0_npy, np.array([330, 330], dtype=np.float64))
-            out = S.apply_editor_f0(e, features)
+            out = cache.apply_editor_f0(e, features)
             np.testing.assert_allclose(np.exp(out[1].flatten()), [330, 330, 220, 220, 220], rtol=1e-5)
 
 
@@ -200,7 +201,7 @@ class TestWorldParamsOnlyWhenRead(unittest.TestCase):
             mgc, lf0, vuv, bap = e.multistream_features
             expected, _, _ = gen_world_params(mgc, lf0, vuv, bap, 48000, vuv_threshold=0.5)
             np.testing.assert_array_equal(np.load(e.path_f0_npy), expected)
-            self.assertTrue(S.npy_outputs_exist(e))
+            self.assertTrue(cache.npy_outputs_exist(e))
 
     def test_world_synthesis_writes_sp_ap(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -208,16 +209,16 @@ class TestWorldParamsOnlyWhenRead(unittest.TestCase):
             e.svs_npy()
             self.assertEqual(np.load(e.path_spectrogram_npy).shape, (40, 1025))
             self.assertTrue(os.path.exists(e.path_aperiodicity_npy))
-            self.assertTrue(S.npy_outputs_exist(e))
+            self.assertTrue(cache.npy_outputs_exist(e))
             os.remove(e.path_aperiodicity_npy)   # 欠けていたらキャッシュを使わない
-            self.assertFalse(S.npy_outputs_exist(e))
+            self.assertFalse(cache.npy_outputs_exist(e))
 
 
 class TestNnsvsSpeedups(unittest.TestCase):
     """nnsvs_speedups の差し替えが元の関数と同じ結果を返すこと。"""
 
     def setUp(self):
-        from enulib import nnsvs_speedups
+        from enuserver import nnsvs_speedups
         from nnmnkwii.frontend import merlin
         from nnmnkwii.io import hts
         nnsvs_speedups.apply()
@@ -295,7 +296,7 @@ class TestNnsvsSpeedups(unittest.TestCase):
         乱数の割り当てが変わる (rf=2, out_dim=60 で不一致になった不具合の再発防止)。
         """
         import torch
-        from enulib import nnsvs_speedups
+        from enuserver import nnsvs_speedups
         from nnsvs.tacotron.decoder import NonAttentiveDecoder
         nnsvs_speedups.apply_cuda_graphs()
         for prenet_layers in (0, 2):
@@ -331,7 +332,7 @@ class TestGraphedDenoiser(unittest.TestCase):
         torch.manual_seed(0)
         net = DiffNet(in_dim=20, encoder_hidden_dim=32, residual_layers=4, residual_channels=32).cuda().eval()
         torch.nn.init.normal_(net.output_projection.weight)   # 既定はゼロ初期化で出力が常に 0 になるため
-        graphed = enunu.GraphedDenoiser(net, max_graphs=2)
+        graphed = diffusion.GraphedDenoiser(net, max_graphs=2)
         with torch.no_grad():
             for T in (50, 80, 50, 120):          # 長さが変わる・戻る・上限を超える
                 x = torch.randn(1, 1, 20, T, device='cuda')
@@ -357,7 +358,7 @@ class TestEnergyPreservingGV(unittest.TestCase):
         idx = np.arange(10, 40)
         original = nnsvs.gen.variance_scaling
         expected = original(gv, feats, offset=2, note_frame_indices=idx)
-        with enunu._energy_preserving_gv(decode):
+        with postfilter.energy_preserving_gv(decode):
             out = nnsvs.gen.variance_scaling(gv, feats, offset=2, note_frame_indices=idx)
         np.testing.assert_array_equal(out[:, 1:], expected[:, 1:])
         np.testing.assert_allclose(decode(out).sum(1), decode(feats).sum(1), rtol=1e-6)

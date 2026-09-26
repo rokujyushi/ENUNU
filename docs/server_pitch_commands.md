@@ -98,7 +98,7 @@ GPU で動かす場合、拡散モデルのデノイザーを CUDA Graphs で実
 - グラフはモデルごとに最大4つまで保持します。VRAM は、長さの違うフレーズが続くと最大で約 300 MiB 増えます。
 - `ENUNU_CUDA_GRAPHS=0` で無効にできます。記録に失敗した長さは、自動で通常の実行に戻します。
 
-### nnsvs / nnmnkwii / pysptk のオーバーライド（`enulib/nnsvs_speedups.py`）
+### nnsvs / nnmnkwii / pysptk のオーバーライド（`enuserver/nnsvs_speedups.py`）
 
 pip で入れたライブラリは書き換えず、import 時に関数を差し替えています。LSTM の差し替え以外は、結果が元の実装と完全に一致します。
 - **質問照合のキャッシュ**（nnmnkwii）: 音素ラベルごとに数千個の正規表現を Python で検索していたので、結果を
