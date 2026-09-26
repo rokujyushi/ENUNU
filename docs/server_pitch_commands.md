@@ -1,23 +1,37 @@
 # ENUNUServer 追加コマンド: `pitch` / `acoustic_f0`
 
-リクエストの形式は既存コマンドと同じ JSON 配列です。
+リクエストは JSON 配列です。ENUNUServer 2 では、`ver_check` と `config` 以外のすべてのコマンドで `request[5]`（style_shift）が必須です。
 
 ```
-[step, ust_path, wav_path, singer_name(hash), duration]
+[step, ust_path, wav_path, singer_name(hash), duration, style_shift]
+["acoustic_f0", ust_path, wav_path, singer_name(hash), duration, style_shift, editor_f0]
 ```
 
-どちらのコマンドも `<ust_path の stem>_enutemp/` をワークフォルダとして使います（`acoustic` と同じ）。
+- `duration`: 最後に使ってから、歌手のモデルを保持する秒数（文字列、OpenUtau は `"600"`）。
+- `style_shift`: 整数（半音）。使わない場合は `0` を送ります（[`style_shift`](#style_shift) を参照）。
+- `pitch` / `acoustic_f0` は `<ust_path の stem>_enutemp/` をワークフォルダとして使います（`acoustic` と同じ）。
 
-## 後方互換について
+## クライアントとの組み合わせ
 
-旧クライアント（SimpleENUNUServer / ENUNUServer / 韓国語版 ENUNUServer 向けの OpenUtau）を壊さないよう、
-以下の追加はすべて「任意のリクエスト要素」と「レスポンスへの項目追加」だけで行っています。
-既存の項目名・意味・`ver_check` の `name` / `version` は変えていません。
+ENUNUServer 2 は、**最新の OpenUtau（`EnunuConnection` を持つクライアント）とセットで使います**。
+旧クライアント（SimpleENUNUServer / ENUNUServer 1 向けの OpenUtau）は `request[5]` を送らないので、このサーバーではエラーになります。
+旧クライアントを使う場合は、ENUNUServer 1 を使ってください。
 
-### `ver_check` の `features`（追加項目）
+| | ENUNUServer 1 | ENUNUServer 2（このサーバー） |
+|---|---|---|
+| `ver_check` の `version` | `1.0.0` | `2.0.0` |
+| `request[5]` | 任意（style_shift） | 必須（style_shift） |
+| `acoustic_f0` の f0 | `request[5]`（style_shift は `[6]`） | `request[6]`（style_shift は `[5]`） |
+| `ver_check` より前のコマンド | `run ver_check.` を返す | 処理する |
+
+最新の OpenUtau は、旧サーバー（SimpleENUNUServer 0.5 / ENUNUServer 0.6 / ENUNUServer 1）にもつながります。
+旧サーバーは `request[5]` から後を読まないので、6 要素で送っても問題ありません。
+韓国語 Phonemizer が 15555 番に送る `["timing", ust_path]` は、別のサーバー向けで、このサーバーには来ません。
+
+### `ver_check` の `features`
 
 ```json
-{"result": {"name": "SimpleENUNUServer", "version": "1.0.0", "author": "roku10shi",
+{"result": {"name": "SimpleENUNUServer", "version": "2.0.0", "author": "roku10shi",
             "features": {"commands": ["timing", "acoustic", "pitch", "acoustic_f0", "synthe", "config"],
                          "style_shift": true, "pitch_n_frames": true,
                          "diffusion": {"mgc": {"method": "ddim", "steps": 25},
@@ -26,8 +40,16 @@
                                        "other": {"method": "ddpm", "steps": 100}}}}}
 ```
 
-- `features` が無いサーバーは旧版とみなし、`pitch` / `acoustic_f0` を使わないでください。
+- クライアントは、使えるコマンドを `version` ではなく `features.commands` で判断してください。
+  `features` が無いサーバーは旧版とみなし、`pitch` / `acoustic_f0` / `config` を使わないでください。
 - `lf0_conditioning` はモデルを読むまで分からないので、ここではなく `pitch` / `acoustic_f0` のレスポンスで返します。
+
+### `ver_check` より前のコマンド
+
+旧サーバーは `ver_check` を受けるまで、ほかのコマンドに `{"error": "run ver_check."}` を返していました。
+このため、サーバーを再起動すると、クライアントが `ver_check` を送り直すまで合成できませんでした。
+このサーバーは `ver_check` より前でもすべてのコマンドを処理します。
+クライアントは、旧サーバー（ENUNUServer 1 など）に対応するために、`run ver_check.` を受けたら `ver_check` を送って再送する処理を残してください。
 
 ### 拡散モデルのステップ数と `config` コマンド
 
@@ -42,16 +64,27 @@
 - 旧環境変数 `ENUNU_DIFFUSION_SPEEDUP` / `TARGETS` / `METHOD` を指定している場合は、従来の意味で解釈します
   （対象外のストリームは間引きなし、`SPEEDUP=1` はすべて間引きなし）。
 
-`config` コマンドでは、実行中に全エンジンの設定を変えられます（OpenUtau の環境設定から送る想定）。
-`ver_check` の後に送ってください。歌手を指定する必要はありません。
+`config` コマンドでは、実行中に全エンジンの設定を変えられます。
+OpenUtau は環境設定を変えたときには送らず、合成のリクエストの前に、環境設定の値を読んで送ります。
+`features.commands` に `config` があるサーバーにだけ送ってください。歌手を指定する必要はありません。
 
 ```json
 ["config", {"diffusion": {"steps": 25}}]
 ["config", {"diffusion": {"mgc": {"method": "ddim", "steps": 25}, "bap": "plms:20"}}]
 ["config", {"diffusion": {"reset": true}}]
+["config", {"diffusion": {"reset": true, "bap": {"steps": 30}}}]
+["config", {"diffusion": {"reset": true, "mgc": "ddpm", "mel": "ddpm", "bap": "ddpm"}}]
 ```
 
 - `steps` だけを送ると、mgc と mel のステップ数だけが変わります。
+- `reset` が無い指定は、今の設定に重ねます。`reset` だけを送ると、環境変数・既定値に戻します。
+- `reset` とストリームの指定を一緒に送ると、環境変数・既定値から始めて、そのストリームだけを変えます。
+  前に送った指定は残りません。不正な値が含まれていれば、何も変えずにエラーを返します。
+- OpenUtau（環境設定の「ENUNU」）は、acoustic 系のリクエストの前に毎回 `reset` 付きで全体を送ります。
+  - 「おすすめ（高速化）」: `reset` と、ステップ数を指定したストリームだけ（`{"steps": N}`、手法は既定のまま）。
+  - 「モデルの設定に従う」: `reset` と、mgc / mel / bap をすべて `ddpm`（間引きなし）。nnsvs のモデルは
+    `pndm_speedup` を持てないので、モデル本来の設定は常に間引きなし（`K_step` 回、通常 100 回）です。
+  - 同じ値を何度送っても、キャッシュは無効になりません（キャッシュの判定には設定の値が入っているため）。
 - レスポンスは `{"result": {"diffusion": <反映後の設定>}}`、不正な値のときは `{"error": "..."}` です。
 - 設定を変えると、`acoustic` は以前の `features.npz` を使わずに計算し直します。
   クライアント側で npy をキャッシュしている場合は、ステップ数をキャッシュのキーに含めてください。
@@ -132,12 +165,14 @@ Python の拡張機能（`.py`）は、プロセス起動のコストを省く�
 拡張機能が書き換えなかった CSV は読み直さず、元の配列をそのまま使います（変更の有無はファイルの中身のハッシュで判定します）。
 そのため、変更していないストリームには CSV を経由した丸めが入りません。
 
-### `style_shift`（任意）
+### `style_shift`
 
-- `timing` 以外のコマンド（`acoustic` / `pitch` / `synthe`）は `request[5]`、`acoustic_f0` は `request[6]` に
-  整数（半音）を置くとスタイルシフトします。省略・数値以外は 0（従来どおり）。
-- ピッチは変えずに声色だけを変えます（USTフラグ `S5` などで使う拡張機能 style_shifter と同じ考え方）。
+- すべてのコマンドで `request[5]` に整数（半音）を置きます（`acoustic_f0` も `[5]` です）。数値以外は 0 として扱います。
+  `timing` は値を使いませんが、形をそろえるために送ります。
+- 0 以外にすると、フレーズ全体をスタイルシフトします。ピッチは変えずに声色だけを変えます
+  （USTフラグ `S5` などで使う拡張機能 style_shifter と同じ考え方）。
   拡張機能と併用すると二重にかかるので、どちらか一方にしてください。
+- OpenUtau はノートごとのスタイルシフトを UST の `S` フラグで送るので、`request[5]` はいつも 0 です。
 
 ### 音響特徴量のファイルキャッシュ（`features.npz`）と `editorf0.npy`
 
@@ -161,8 +196,9 @@ lf0_model の dropout、拡散のノイズ、ボコーダのノイズは乱数�
 - `synthe` の合成中だけ `torch.use_deterministic_algorithms` を有効にしています。GPU の一部の演算が非決定的なためで、
   ボコーダが 0.01〜0.03 秒ほど遅くなります（サーバーは起動時に `CUBLAS_WORKSPACE_CONFIG=:4096:8` を設定します）。
 - `synthe`: `features.npz` があれば推論せずに合成します。無ければ `acoustic` を実行してから合成します。
-  - **ピッチだけ変えた場合（旧クライアント互換）**: ワークフォルダに `editorf0.npy`（float64、Hz、`(T,)`）を置いて
+  - **ピッチだけ変えた場合**: ワークフォルダに `editorf0.npy`（float64、Hz、`(T,)`）を置いて
     `synthe` を呼ぶと、キャッシュ済みの特徴量の lf0 をそのピッチに差し替えて合成します。0 のフレームはモデルのピッチのままです。
+    OpenUtau は `synthe` の前に毎回これを書きます（`lf0_conditioning: false` のモデルは、この方法でエディタのピッチを使います）。
   - `features.npz` が無い旧版のワークフォルダでも、melf0 モデルなら `mel.npy` / `vuv.npy` / `f0.npy` から復元します。
   - `synthe` の style_shift は、キャッシュが無く作り直すときだけ使います。
   - **tmp が無い場合**: OpenUtau の「選択ノートのキャッシュ削除」は `enu-*.tmp` だけを消して `_enutemp` を残すので、
@@ -172,7 +208,7 @@ lf0_model の dropout、拡散のノイズ、ボコーダのノイズは乱数�
 ## `pitch` — ピッチ（F0）だけを推定する
 
 ```json
-["pitch", "<cache>/enu-xxxx.tmp", "", "<voicebankNameHash>", "600"]
+["pitch", "<cache>/enu-xxxx.tmp", "", "<voicebankNameHash>", "600", 0]
 ```
 
 レスポンス:
@@ -195,10 +231,11 @@ lf0_model の dropout、拡散のノイズ、ボコーダのノイズは乱数�
 エディタの F0 配列をリクエストに直接埋め込みます（ファイル経由不要）。
 
 ```json
-["acoustic_f0", "<cache>/enu-xxxx.tmp", "", "<voicebankNameHash>", "600", [0.0, 220.5, 220.5, ...]]
+["acoustic_f0", "<cache>/enu-xxxx.tmp", "", "<voicebankNameHash>", "600", 0, [0.0, 220.5, 220.5, ...]]
 ```
 
-- `request[5]`: float64 配列 (Hz)、形状 `(T,)`。0 のフレームはモデル自身のピッチを使います。
+- `request[5]`: style_shift（ほかのコマンドと同じ）。
+- `request[6]`: float64 配列 (Hz)、形状 `(T,)`。0 のフレームはモデル自身のピッチを使います。
   フレーム数は `pitch` コマンドの `pitch_f0.npy` の長さと一致させてください。
 
 レスポンス: `acoustic` と同じ項目に `lf0_conditioning` が加わります。
@@ -208,6 +245,10 @@ lf0_model の dropout、拡散のノイズ、ボコーダのノイズは乱数�
             "path_mel": "...", "path_vuv": "...", "lf0_conditioning": true}}
 ```
 
+- `path_spectrogram` / `path_aperiodicity` のファイル（`acoustic` も同じ）は、OpenUtau が自分で WORLD 合成する音源だけに作ります。
+  つまり `feature_type: world` で、`extensions.wav_synthesizer` に `synthe` が無い音源です。
+  それ以外（melf0、`wav_synthesizer: synthe`）では OpenUtau は読まないので作りません。1 フレーズで約 13MB あり、キャッシュの大半を占めていたためです。
+  判定は `EnunuRenderer` の `useSynthe` の逆（`ENUNU.client_reads_world_params`）なので、どちらかを変えるときは両方直してください。
 - `lf0_conditioning: true` のモデルは、`lf0_model` の出力を editorf0 に置き換えます。
   そのうえで mgc / bap / mel / vuv を生成し直すので、声色や有声/無声の判定がエディタのピッチに合います。
 - `false` のモデルでは editorf0 は無視され、`acoustic` と同じ結果になります（警告ログを出します）。
@@ -217,9 +258,12 @@ lf0_model の dropout、拡散のノイズ、ボコーダのノイズは乱数�
 
 1. `pitch` → `pitch_f0.npy`。描画用ピッチ（LoadRenderedPitch）に使います。
 2. フレーム数 = レスポンスの `n_frames` として editorF0 配列を作ります。
-3. `["acoustic_f0", ..., editorF0.ToList()]` — f0 配列をリクエスト `[5]` に直接埋め込んで送信します。
+3. `["acoustic_f0", ust, "", hash, "600", 0, editorF0]` — f0 配列をリクエスト `[6]` に直接埋め込んで送信します。
    → f0 / sp / ap（WORLD）または mel / vuv（melf0）を受け取ります。
-4. これまでどおり WORLD 合成、または `synthe` を呼びます。
+   `lf0_conditioning: false` のモデルは、代わりに `acoustic` を送ります（`acoustic_f0` ではピッチを変えるたびにキャッシュが外れるため）。
+4. これまでどおり WORLD 合成、または `synthe` を呼びます（`synthe` の前に `editorf0.npy` を書きます）。
+
+クライアント側の設計は [openutau_client_design.md](openutau_client_design.md) を見てください。
 
 ## 動作確認（2026-09-25、RTX 5060 Ti、8 秒のフレーズ）
 

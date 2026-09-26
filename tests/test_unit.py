@@ -30,15 +30,13 @@ def brief(settings):
 
 class TestParseStyleShift(unittest.TestCase):
     def test_values(self):
-        base = ['acoustic', 'a.tmp', '', 'hash', '600']
-        self.assertEqual(S.parse_style_shift(base, 5), 0)              # 旧クライアント (5要素)
-        self.assertEqual(S.parse_style_shift(base + ['3'], 5), 3)
-        self.assertEqual(S.parse_style_shift(base + [-2], 5), -2)
-        self.assertEqual(S.parse_style_shift(base + [1.6], 5), 2)
+        # request[5] の値 (ENUNUServer 2 では全コマンドで必須。acoustic_f0 も [5] が style_shift で [6] が f0)
+        self.assertEqual(S.parse_style_shift(0), 0)
+        self.assertEqual(S.parse_style_shift('3'), 3)
+        self.assertEqual(S.parse_style_shift(-2), -2)
+        self.assertEqual(S.parse_style_shift(1.6), 2)
         for bad in (None, 'abc', True, [1.0], {'a': 1}):
-            self.assertEqual(S.parse_style_shift(base + [bad], 5), 0, bad)
-        # acoustic_f0 は [5] が f0 配列、[6] が style_shift
-        self.assertEqual(S.parse_style_shift(base + [[100.0, 0.0], 4], 6), 4)
+            self.assertEqual(S.parse_style_shift(bad), 0, bad)
 
 
 class TestDiffusionSettings(unittest.TestCase):
@@ -80,6 +78,24 @@ class TestDiffusionSettings(unittest.TestCase):
             self.assertEqual(brief(enunu.diffusion_settings())['mgc'], 'eta1:10')  # 不正値では変わらない
             enunu.set_diffusion_settings({'reset': True})
             self.assertEqual(brief(enunu.diffusion_settings())['mgc'], 'ddim:25')
+
+    def test_config_reset_with_streams(self):
+        # reset と一緒に来た指定は、既定値から始めて反映する (前に送った mgc の指定は残らない)
+        with clean_env():
+            enunu.set_diffusion_settings({'mgc': 'eta1:10'})
+            b = brief(enunu.set_diffusion_settings({'reset': True, 'bap': {'steps': 30}}))
+            self.assertEqual((b['mgc'], b['mel'], b['bap']), ('ddim:25', 'ddim:25', 'plms:30'))
+            # OpenUtau の「モデルの設定に従う」 (間引きなし)
+            b = brief(enunu.set_diffusion_settings({'reset': True, 'mgc': 'ddpm', 'mel': 'ddpm', 'bap': 'ddpm'}))
+            self.assertEqual({b[k][:4] for k in ('mgc', 'mel', 'bap')}, {'ddpm'})
+            # 不正な値なら何も変えない
+            with self.assertRaises(ValueError):
+                enunu.set_diffusion_settings({'reset': True, 'bap': 'foo:3'})
+            self.assertEqual(brief(enunu.diffusion_settings())['bap'][:4], 'ddpm')
+        # 環境変数の値も reset の起点になる
+        with clean_env(ENUNU_DIFFUSION_MGC='ddim:40'):
+            b = brief(enunu.set_diffusion_settings({'reset': True, 'bap': {'steps': 30}}))
+            self.assertEqual(b['mgc'], 'ddim:40')
 
 
 def fake_engine(tmp, feature_type='world'):
@@ -142,6 +158,59 @@ class TestEditorF0(unittest.TestCase):
             np.save(e.path_editorf0_npy, np.array([330, 330], dtype=np.float64))
             out = S.apply_editor_f0(e, features)
             np.testing.assert_allclose(np.exp(out[1].flatten()), [330, 330, 220, 220, 220], rtol=1e-5)
+
+
+class TestWorldParamsOnlyWhenRead(unittest.TestCase):
+    """sp/ap の npy は、OpenUtau が WORLD 合成するとき (synthe を使わない world モデル) だけ作る。"""
+
+    def engine(self, tmp, feature_type, wav_synthesizer):
+        from omegaconf import OmegaConf
+        e = fake_engine(tmp, feature_type)
+        e.path_spectrogram_npy = os.path.join(tmp, 'spectrogram.npy')
+        e.path_aperiodicity_npy = os.path.join(tmp, 'aperiodicity.npy')
+        e.config = OmegaConf.create({'sample_rate': 48000, 'use_world_codec': False,
+                                     'extensions': {'wav_synthesizer': wav_synthesizer}})
+        e.start_time = None
+        e.interp1d = None
+        for name in ('get_extension_path_list', 'client_reads_world_params', 'svs_npy'):
+            setattr(e, name, types.MethodType(getattr(enunu.ENUNU, name), e))
+        rng = np.random.default_rng(0)
+        lf0 = np.log(rng.uniform(100, 400, size=(40, 1)))
+        vuv = (rng.uniform(size=(40, 1)) > 0.3).astype(np.float64)
+        e.multistream_features = (rng.normal(size=(40, 60)) * 0.1, lf0, vuv, rng.normal(size=(40, 5)) - 5)
+        return e
+
+    def test_decision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertTrue(self.engine(tmp, 'world', None).client_reads_world_params())
+            self.assertTrue(self.engine(tmp, 'world', '%e/extensions/synthe.py').client_reads_world_params())
+            self.assertFalse(self.engine(tmp, 'world', 'synthe').client_reads_world_params())
+            self.assertFalse(self.engine(tmp, 'world', ['foo', 'synthe']).client_reads_world_params())
+            self.assertFalse(self.engine(tmp, 'melf0', None).client_reads_world_params())
+
+    def test_synthe_skips_sp_ap_with_same_f0(self):
+        from nnsvs.gen import gen_world_params
+        with tempfile.TemporaryDirectory() as tmp:
+            e = self.engine(tmp, 'world', 'synthe')
+            for path in (e.path_spectrogram_npy, e.path_aperiodicity_npy):
+                np.save(path, np.zeros(3))   # 前の設定で作った古いもの
+            e.svs_npy()
+            self.assertFalse(os.path.exists(e.path_spectrogram_npy))
+            self.assertFalse(os.path.exists(e.path_aperiodicity_npy))
+            mgc, lf0, vuv, bap = e.multistream_features
+            expected, _, _ = gen_world_params(mgc, lf0, vuv, bap, 48000, vuv_threshold=0.5)
+            np.testing.assert_array_equal(np.load(e.path_f0_npy), expected)
+            self.assertTrue(S.npy_outputs_exist(e))
+
+    def test_world_synthesis_writes_sp_ap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            e = self.engine(tmp, 'world', None)
+            e.svs_npy()
+            self.assertEqual(np.load(e.path_spectrogram_npy).shape, (40, 1025))
+            self.assertTrue(os.path.exists(e.path_aperiodicity_npy))
+            self.assertTrue(S.npy_outputs_exist(e))
+            os.remove(e.path_aperiodicity_npy)   # 欠けていたらキャッシュを使わない
+            self.assertFalse(S.npy_outputs_exist(e))
 
 
 class TestNnsvsSpeedups(unittest.TestCase):
@@ -276,6 +345,33 @@ class TestGraphedDenoiser(unittest.TestCase):
         self.assertTrue(graphed(x, t, cond).requires_grad)
 
 
+class TestEnergyPreservingGV(unittest.TestCase):
+    """GV ポストフィルタ: スペクトルの形 (c1 以降) は元の GV と同じで、フレームごとのパワーは GV 前のまま。"""
+
+    def check(self, decode):
+        import nnsvs.gen
+        rng = np.random.default_rng(0)
+        feats = rng.normal(scale=0.1, size=(50, 40))
+        feats[:, 0] += 2
+        gv = np.full(40, 0.05)
+        idx = np.arange(10, 40)
+        original = nnsvs.gen.variance_scaling
+        expected = original(gv, feats, offset=2, note_frame_indices=idx)
+        with enunu._energy_preserving_gv(decode):
+            out = nnsvs.gen.variance_scaling(gv, feats, offset=2, note_frame_indices=idx)
+        np.testing.assert_array_equal(out[:, 1:], expected[:, 1:])
+        np.testing.assert_allclose(decode(out).sum(1), decode(feats).sum(1), rtol=1e-6)
+        self.assertIs(nnsvs.gen.variance_scaling, original)   # 元に戻っている
+
+    def test_mc2sp(self):
+        import pysptk
+        self.check(lambda m: pysptk.mc2sp(np.ascontiguousarray(m), fftlen=1024, alpha=0.55))
+
+    def test_world_codec(self):
+        import pyworld
+        self.check(lambda m: pyworld.decode_spectral_envelope(np.ascontiguousarray(m), 44100, 2048))
+
+
 class TestEditAcousticReload(unittest.TestCase):
     """edit_acoustic: 拡張機能が書き換えなかった CSV は読み直さず、元の配列 (丸めなし) を使う。"""
 
@@ -317,6 +413,16 @@ class TestEditAcousticReload(unittest.TestCase):
             'np.savetxt(args["--mgc"], np.zeros((20, 6)), fmt="%.9g", delimiter=",")\n')
         np.testing.assert_array_equal(out[0], np.zeros((20, 6)))
         np.testing.assert_array_equal(out[1], features[1])
+
+    def test_short_f0_is_aligned(self):
+        # 1 フレーム短い f0 を書き戻す拡張機能 (vibrato_applier で起きた)。vuv と長さが揃い、末尾は元の値
+        features, out = self.run_edit(
+            'import sys, numpy as np\nargs = dict(zip(sys.argv[1::2], sys.argv[2::2]))\n'
+            'f0 = np.loadtxt(args["--f0"], delimiter=",")\nnp.savetxt(args["--f0"], f0[:-1] * 2, fmt="%.9g", delimiter=",")\n')
+        self.assertEqual(out[1].shape, features[1].shape)
+        self.assertEqual(len(out[1]), len(out[2]))
+        np.testing.assert_allclose(out[1][:-1], features[1][:-1] + np.log(2), atol=1e-7)
+        np.testing.assert_array_equal(out[1][-1], features[1][-1])
 
 
 class TestExtensionInProcess(unittest.TestCase):

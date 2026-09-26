@@ -34,7 +34,7 @@ def check():
     # 'features' は追加項目 (未対応クライアントは無視する)。
     return{
         'name': 'SimpleENUNUServer',
-        'version': '1.0.0',
+        'version': '2.0.0',
         'author': 'roku10shi',
         'features': {
             'commands': ['timing', 'acoustic', 'pitch', 'acoustic_f0', 'synthe', 'config'],
@@ -44,14 +44,11 @@ def check():
         },
     }
 
-def parse_style_shift(request, index):
+def parse_style_shift(value):
     """request[index] を style_shift (半音, int) として読む。
 
     旧クライアントは送らないので、無い・数値でない場合は 0 にする。
     """
-    if len(request) <= index:
-        return 0
-    value = request[index]
     if value is None or isinstance(value, (bool, list, dict)):
         return 0
     try:
@@ -69,8 +66,10 @@ def ust_digest(engine: enunu.ENUNU):
 
 def features_meta(engine: enunu.ENUNU, kind, style_shift, digest, **extra):
     # 拡散設定が変わったら (環境設定でステップ数を変えた等) キャッシュは使わない
+    # postfilter: GV でパワーを保つようにする前のキャッシュ (ノイズが乗ることがある) を使わないため
     return {'kind': kind, 'style_shift': style_shift, 'ust': digest,
-            'feature_type': engine.feature_type, 'diffusion': enunu.diffusion_settings(), **extra}
+            'feature_type': engine.feature_type, 'diffusion': enunu.diffusion_settings(),
+            'postfilter': 'gv-energy', **extra}
 
 def seed_rng(engine: enunu.ENUNU, digest, style_shift=0):
     """UST のハッシュから乱数のシードを決める。
@@ -174,6 +173,13 @@ def apply_editor_f0(engine: enunu.ENUNU, features):
     print('synthe: pitch replaced by editorf0.npy')
     return tuple(features)
 
+def npy_outputs_exist(engine: enunu.ENUNU):
+    """クライアントが読む npy が揃っているか。sp/ap は OpenUtau が WORLD 合成するときだけ作る (svs_npy 参照)。"""
+    paths = [engine.path_f0_npy]
+    if engine.client_reads_world_params():
+        paths += [engine.path_spectrogram_npy, engine.path_aperiodicity_npy]
+    return all(p and os.path.isfile(p) for p in paths)
+
 def timing(engine: enunu.ENUNU):
     print('timing: start')
     enunu.run_timing(engine=engine,)
@@ -195,7 +201,7 @@ def acoustic(engine: enunu.ENUNU, style_shift=0):
     cached = (
         features is not None
         and meta == features_meta(engine, 'acoustic', style_shift, digest)
-        and os.path.isfile(engine.path_f0_npy)
+        and npy_outputs_exist(engine)
     )
     if cached:
         print('acoustic: use cached features')
@@ -256,7 +262,7 @@ def acoustic_f0(engine: enunu.ENUNU, editor_f0: np.ndarray, style_shift=0):
     features, meta = load_features(engine)
     if (features is not None
             and meta == features_meta(engine, 'acoustic_f0', style_shift, digest, editor_f0=f0_digest)
-            and os.path.isfile(engine.path_f0_npy)):
+            and npy_outputs_exist(engine)):
         # 同じ UST・同じエディタのピッチで作った結果が残っている (再要求など)
         print('acoustic_f0: use cached features')
         engine.multistream_features = features
@@ -381,7 +387,6 @@ def main():
     print('Started enunu server')
 
 
-    support = False
     engine_dict = {}
 
     for message in poll_socket(socket):
@@ -400,12 +405,14 @@ def main():
         response = {}
         engine,duration,request_time = None,600,None
         try:
+            # ver_check より前のコマンドも受け付ける。以前は 'run ver_check.' を返していたので、
+            # サーバーを再起動するとクライアントが ver_check を送り直すまで合成できなかった。
+            # 旧クライアントは必ず先に ver_check を送るので影響はない。
             if request[0] == 'ver_check':
-                support = True
                 response['result'] = check()
-            elif support and request[0] == 'config':
+            elif request[0] == 'config':
                 response['result'] = config(request[1] if len(request) > 1 else None, engine_dict)
-            elif support:
+            else:
                 path_plugin, cache_only = resolve_plugin_path(request)
                 if request[3] in engine_dict:
                     engine,duration,request_time = engine_dict[request[3]]
@@ -423,19 +430,17 @@ def main():
                 if request[0] == 'timing':
                     response['result'] = timing(engine)
                 elif request[0] == 'acoustic':
-                    response['result'] = acoustic(engine, parse_style_shift(request, 5))
+                    response['result'] = acoustic(engine, parse_style_shift(request[5]))
                 elif request[0] == 'pitch':
-                    response['result'] = pitch(engine, parse_style_shift(request, 5))
+                    response['result'] = pitch(engine, parse_style_shift(request[5]))
                 elif request[0] == 'acoustic_f0':
-                    editor_f0 = np.asarray(request[5], dtype=np.float64)
-                    response['result'] = acoustic_f0(engine, editor_f0, parse_style_shift(request, 6))
+                    editor_f0 = np.asarray(request[6], dtype=np.float64)
+                    response['result'] = acoustic_f0(engine, editor_f0, parse_style_shift(request[5]))
                 elif request[0] == 'synthe':
-                    response['result'] = synthe(request[2],engine, parse_style_shift(request, 5), cache_only)
+                    response['result'] = synthe(request[2],engine, parse_style_shift(request[5]), cache_only)
                 else:
                     raise NotImplementedError('unexpected command %s' % request[0])
-            else:
-                response['error'] = 'run ver_check.'
-            
+
         except Exception as e:
             response['error'] = str(e)
             traceback.print_exc()

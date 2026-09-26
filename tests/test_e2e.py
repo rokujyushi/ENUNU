@@ -100,6 +100,14 @@ class ServerE2EBase:
             return wav
         raise ValueError(command)
 
+    def test_sp_ap_only_when_client_reads_them(self):
+        # OpenUtau が synthe で合成する音源 (melf0 や wav_synthesizer: synthe) では sp/ap の npy を作らない
+        r = self.request('acoustic', self.tmp_a)
+        reads = self.engine.client_reads_world_params()
+        self.assertTrue(os.path.isfile(r['path_f0']))
+        self.assertEqual(os.path.isfile(r['path_spectrogram']), reads)
+        self.assertEqual(os.path.isfile(r['path_aperiodicity']), reads)
+
     def test_phrase_switch_uses_per_phrase_cache(self):
         with Counter() as c:
             ra = self.request('acoustic', self.tmp_a)
@@ -222,7 +230,7 @@ class ServerE2EBase:
     def test_lf0_decoder_graph_matches_eager(self):
         import torch
         from nnsvs.acoustic_models.tacotron_f0 import ResF0NonAttentiveDecoder
-        decoder = getattr(self.engine.acoustic_model.lf0_model, 'decoder', None)
+        decoder = getattr(getattr(self.engine.acoustic_model, 'lf0_model', None), 'decoder', None)
         if not (isinstance(decoder, ResF0NonAttentiveDecoder) and torch.cuda.is_available()):
             self.skipTest('ResF0NonAttentiveDecoder と CUDA が必要')
         from nnmnkwii.io import hts

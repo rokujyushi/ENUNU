@@ -10,6 +10,7 @@ import tempfile
 import time
 import unittest
 
+import numpy as np
 import zmq
 
 import _common
@@ -67,17 +68,21 @@ class TestZmqProtocol(unittest.TestCase):
         with open(self.log_path, encoding='utf-8', errors='ignore') as f:
             return f.read()
 
-    def test_1_requires_ver_check(self):
-        # サーバーは ver_check を受けるまで他のコマンドを受け付けない (従来どおり)
-        res = self.send(['acoustic', 'x.tmp', '', 'hash', '600'])
-        self.assertEqual(res.get('error'), 'run ver_check.')
+    def test_1_no_ver_check_needed(self):
+        # ver_check より前のコマンドも処理する (再起動したサーバーに ver_check なしで送っても通る)。
+        # 存在しない tmp なのでエラーになるが、'run ver_check.' ではなく処理した結果のエラー
+        res = self.send(['acoustic', 'x.tmp', '', 'hash', '600', 0])
+        self.assertIn('error', res)
+        self.assertNotEqual(res['error'], 'run ver_check.')
+        res = self.send(['config', {'diffusion': {'steps': 25}}])
+        self.assertEqual(res['result']['diffusion']['mgc'], {'method': 'ddim', 'steps': 25})
 
     def test_2_ver_check(self):
         res = self.send(['ver_check'])
         result = res['result']
-        # 旧クライアントが見る項目は変えない
+        # OpenUtau は name があれば 15556 のサーバーとみなす。version 2 は新しいクライアント専用
         self.assertEqual((result['name'], result['version'], result['author']),
-                         ('SimpleENUNUServer', '1.0.0', 'roku10shi'))
+                         ('SimpleENUNUServer', '2.0.0', 'roku10shi'))
         self.assertIn('config', result['features']['commands'])
         self.assertEqual(result['features']['diffusion']['mgc'], {'method': 'ddim', 'steps': 25})
 
@@ -94,7 +99,7 @@ class TestZmqProtocol(unittest.TestCase):
 
     def test_4_unknown_command(self):
         self.send(['ver_check'])
-        res = self.send(['nope', 'x.tmp', '', 'hash', '600'])
+        res = self.send(['nope', 'x.tmp', '', 'hash', '600', 0])
         self.assertIn('error', res)
 
     def test_5_openutau_flow_and_engine_expiry(self):
@@ -105,28 +110,41 @@ class TestZmqProtocol(unittest.TestCase):
         tmp = _common.write_tmp(os.path.join(self.work, 'enu-z.tmp'), voice, _common.PHRASE_A)
         tmp2 = _common.write_tmp(os.path.join(self.work, 'enu-y.tmp'), voice, _common.PHRASE_B)
         self.send(['ver_check'])
-        # EnunuRenderer と同じ 5 要素のリクエスト (duration=5 秒で有効期限を試す)
-        res = self.send(['acoustic', tmp, '', 'X', '5'])
+        # EnunuRenderer と同じ流れ: pitch → acoustic_f0 → synthe (duration=5 秒で有効期限を試す)。
+        # [5] は style_shift (必須)、acoustic_f0 の f0 は [6]
+        res = self.send(['pitch', tmp, '', 'X', '5', 0])
         self.assertNotIn('error', res)
-        for key in ('path_f0', 'path_spectrogram', 'path_aperiodicity', 'path_mel', 'path_vuv'):
+        f0 = np.load(res['result']['path_f0'])
+        self.assertEqual(len(f0), res['result']['n_frames'])
+        editor_f0 = (f0 * 2 ** (200 / 1200)).tolist()   # モデルのピッチ +200 cent
+        res = self.send(['acoustic_f0', tmp, '', 'X', '5', 0, editor_f0])
+        self.assertNotIn('error', res)
+        for key in ('path_f0', 'path_spectrogram', 'path_aperiodicity', 'path_mel', 'path_vuv', 'lf0_conditioning'):
             self.assertIn(key, res['result'])
-        self.assertTrue(os.path.isfile(res['result']['path_f0']))
+        if res['result']['lf0_conditioning']:
+            # [6] の f0 が使われていれば、モデルのピッチより約 +200 cent 高くなる (無視されていれば約 0)。
+            # 拡張機能が f0 を加工する音源もあるので、完全一致ではなく中央値で見る
+            out_f0 = np.load(res['result']['path_f0'])
+            voiced = (out_f0 > 0) & (f0 > 0)
+            self.assertTrue(voiced.any())
+            cents = np.median(1200 * np.log2(out_f0[voiced] / f0[voiced]))
+            self.assertAlmostEqual(cents, 200, delta=30)
         wav = os.path.join(self.work, 'z.wav')
-        res = self.send(['synthe', tmp, wav, 'X', '5'])
+        res = self.send(['synthe', tmp, wav, 'X', '5', 0])
         self.assertEqual(res['result']['path_wav'], wav)
         self.assertTrue(os.path.getsize(wav) > 1000)
         loads = self.server_log().count('Loading models')
         # 3 秒おきに使い続ける間は破棄されない
         for _ in range(3):
             time.sleep(3)
-            self.send(['pitch', tmp, '', 'X', '5'])
+            self.send(['pitch', tmp, '', 'X', '5', 0])
         self.assertEqual(self.server_log().count('Loading models'), loads)
         # 別の歌手だけを使い続けると X は破棄され、次に使うと読み込み直す
-        self.send(['pitch', tmp2, '', 'Y', '600'])
+        self.send(['pitch', tmp2, '', 'Y', '600', 0])
         time.sleep(6)
-        self.send(['pitch', tmp2, '', 'Y', '600'])
+        self.send(['pitch', tmp2, '', 'Y', '600', 0])
         self.assertIn('release engine: X', self.server_log())
-        self.send(['pitch', tmp, '', 'X', '5'])
+        self.send(['pitch', tmp, '', 'X', '5', 0])
         self.assertEqual(self.server_log().count('Loading models'), loads + 2)
 
 
@@ -136,11 +154,11 @@ class TestZmqProtocol(unittest.TestCase):
             self.skipTest('テスト用の音源が見つからない')
         tmp = _common.write_tmp(os.path.join(self.work, 'enu-w.tmp'), voices[-1], _common.PHRASE_A)
         self.send(['ver_check'])
-        self.assertNotIn('error', self.send(['acoustic', tmp, '', 'W', '600']))
+        self.assertNotIn('error', self.send(['acoustic', tmp, '', 'W', '600', 0]))
         os.remove(tmp)   # OpenUtau の「選択ノートのキャッシュ削除」相当
         # まだ読み込まれていない歌手 (再起動後相当) でも、ワークフォルダの temp.ust から読み込んで合成できる
         wav = os.path.join(self.work, 'w.wav')
-        res = self.send(['synthe', tmp, wav, 'V', '600'])
+        res = self.send(['synthe', tmp, wav, 'V', '600', 0])
         self.assertNotIn('error', res)
         self.assertTrue(os.path.getsize(wav) > 1000)
 

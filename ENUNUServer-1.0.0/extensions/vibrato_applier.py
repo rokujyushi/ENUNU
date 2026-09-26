@@ -218,10 +218,13 @@ def apply_vibrato_to_f0(path_f0_in: str, path_f0_out: str, path_delta_f0_cent: s
     # if len(f0_cent_list) < len(delta_f0_cent_list):
     #     delta_f0_cent_list = delta_f0_cent_list[:len(f0_cent_list)]
 
+    # Δf0 が足りないフレームはビブラート無しとする (zip で f0 が切り詰められないように、f0 の長さを保つ)
+    delta_f0_cent_list = list(delta_f0_cent_list[:len_f0_list]) + [0] * max(0, len_f0_list - len(delta_f0_cent_list))
+
     # f0 にビブラートを加算する。ただし、f0 = 0Hz (f0_cent=0) の時は無声部分なのでビブラートを無視する。
     f0_cent_list = [
         f0_cent + delta if f0_cent > 0 else f0_cent
-        for f0_cent, delta in zip(f0_cent_list, delta_f0_cent_list, strict=False)
+        for f0_cent, delta in zip(f0_cent_list, delta_f0_cent_list, strict=True)
     ]
 
     # f0 を cent から Hz に戻す

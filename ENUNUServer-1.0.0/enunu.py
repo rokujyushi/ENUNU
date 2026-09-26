@@ -83,6 +83,7 @@ from nnsvs.svs import SPSVS  # noqa: E402
 # ↓EnunuServerCustom
 from nnsvs.gen import gen_world_params
 import pyworld
+import pysptk
 from nnmnkwii.frontend import merlin as fe
 from nnmnkwii.preprocessing.f0 import interp1d
 from nnsvs.base import PredictionType
@@ -170,6 +171,34 @@ def find_table(model_dir: str) -> str:
         logger.warning('Multiple table files are found. : %s', table_files)
     logger.info('Using %s', basename(table_files[0]))
     return table_files[0]
+
+
+@contextmanager
+def _energy_preserving_gv(decode):
+    """nnsvs の GV ポストフィルタ (variance_scaling) を、フレームごとのパワーを保つものに差し替える。
+
+    decode: mgc (フレーム, 次数) -> パワースペクトル (フレーム, fftlen // 2 + 1)。
+    c0 を Δ 増やすと対数パワーが k*Δ 増える (mc2sp なら k=2) ので、k は decode から求める。
+    """
+    original = nnsvs.gen.variance_scaling
+
+    def variance_scaling(gv, feats, offset=2, note_frame_indices=None):
+        out = original(gv, feats, offset=offset, note_frame_indices=note_frame_indices)
+        idx = slice(None) if note_frame_indices is None else note_frame_indices
+        unit = np.zeros((2, feats.shape[1]))
+        unit[1, 0] = 1
+        k = np.mean(np.diff(np.log(decode(unit)), axis=0))
+        tiny = np.finfo(np.float64).tiny
+        before = np.maximum(decode(feats[idx]).sum(1), tiny)
+        after = np.maximum(decode(out[idx]).sum(1), tiny)
+        out[idx, 0] += np.log(before / after) / k
+        return out
+
+    nnsvs.gen.variance_scaling = variance_scaling
+    try:
+        yield
+    finally:
+        nnsvs.gen.variance_scaling = original
 
 
 def adjust_wav_gain_for_float32(wav: np.ndarray):
@@ -313,6 +342,16 @@ class ENUNU(SPSVS):
             'Extension path must be null or strings or list, '
             f'not {type(extension_list)} for {extension_list}'
         )
+
+    def client_reads_world_params(self) -> bool:
+        """OpenUtau が spectrogram.npy / aperiodicity.npy を読んで自分で WORLD 合成するかどうか。
+
+        EnunuRenderer の useSynthe (wav_synthesizer に "synthe" がある、または melf0) の逆。
+        どちらかを変えるときは両方直すこと。
+        """
+        if self.feature_type != 'world':
+            return False
+        return 'synthe' not in self.get_extension_path_list('wav_synthesizer')
 
     def edit_ust(self, ust: utaupy.ust.Ust, key='ust_editor') -> utaupy.ust.Ust:
         """
@@ -478,16 +517,31 @@ class ENUNU(SPSVS):
 
         # 編集が終わったらCSV読み取り。書き換えられていないものは元の配列をそのまま使う
         # (CSV を経由した丸めも入らない。多くの拡張機能は f0 だけを書き換える)
+        def align(path, edited, original):
+            # 拡張機能がフレーム数を変えて書き戻すことがある (vibrato_applier など)。
+            # ストリーム間で長さが食い違うと後段で落ちるので元の長さに合わせ、足りない分は元の値で埋める
+            original = np.asarray(original, dtype=np.float64)
+            edited = edited.reshape((-1,) + original.shape[1:])
+            if len(edited) == len(original):
+                return edited
+            logger.warning('%s: %d frames written back, expected %d. Aligning to %d.',
+                           path, len(edited), len(original), len(original))
+            out = original.copy()
+            n = min(len(edited), len(original))
+            out[:n] = edited[:n]
+            return out
+
         def reload(path, original):
             if path in written and exists(path) and file_digest(path) == written[path]:
                 return np.asarray(original, dtype=np.float64)
-            return np.loadtxt(path, delimiter=',', dtype=np.float64)
+            return align(path, np.loadtxt(path, delimiter=',', dtype=np.float64, ndmin=1), original)
 
         def reload_lf0():
             # f0 は exp(lf0) を書き出しているので、書き換えられていなければ元の lf0 を使う
             if self.path_f0 in written and exists(self.path_f0) and file_digest(self.path_f0) == written[self.path_f0]:
                 return np.asarray(lf0, dtype=np.float64).reshape(-1, 1)
-            return np.log(np.loadtxt(self.path_f0, delimiter=',', dtype=np.float64)).reshape(-1, 1)
+            edited = np.log(np.loadtxt(self.path_f0, delimiter=',', dtype=np.float64, ndmin=1))
+            return align(self.path_f0, edited, np.asarray(lf0).reshape(-1, 1))
 
         if feature_type == 'world':
             mgc = reload(self.path_mgc, mgc)
@@ -659,6 +713,31 @@ class ENUNU(SPSVS):
             and hasattr(self.acoustic_model, 'out_lf0_idx')
             and lf0_model.prediction_type() != PredictionType.PROBABILISTIC
         )
+
+    def postprocess_acoustic(self, *args, **kwargs):
+        """nnsvs の後処理。WORLD の GV ポストフィルタだけ、フレームごとのパワーを GV 前に戻す。
+
+        GV はフレーズ内の mgc の分散を学習データの分散に合わせて広げるが、
+        OpenUtau は休符ごとにフレーズを分けて送るので、短いフレーズでは分散が小さく倍率が大きくなる
+        (「ま」だけのフレーズで中央値 4 倍、最大 10 倍。曲全体では中央値 2.2 倍)。
+        すると m などの鼻音で低域が持ち上がりすぎ、40 dB 以上のノイズになる。
+        Merlin のポストフィルタと同じく c0 でパワーを揃えると、スペクトルの強調は残したまま防げる。
+        """
+        if self.feature_type != 'world':
+            return super().postprocess_acoustic(*args, **kwargs)
+        sample_rate = self.config.sample_rate
+        fftlen = pyworld.get_cheaptrick_fft_size(sample_rate)
+        if self.config.get('use_world_codec', False):
+            def decode(mgc):
+                return pyworld.decode_spectral_envelope(
+                    np.ascontiguousarray(mgc, dtype=np.float64), sample_rate, fftlen)
+        else:
+            alpha = pysptk.util.mcepalpha(sample_rate)
+
+            def decode(mgc):
+                return pysptk.mc2sp(np.ascontiguousarray(mgc, dtype=np.float64), fftlen=fftlen, alpha=alpha)
+        with _energy_preserving_gv(decode):
+            return super().postprocess_acoustic(*args, **kwargs)
 
     def apply_diffusion_settings(self, settings: dict) -> None:
         """acoustic_model 配下の GaussianDiffusion ごとにサンプラとステップ数を設定する。
@@ -855,19 +934,30 @@ class ENUNU(SPSVS):
         if vocoder_type not in ["world", "pwg", "usfgan", "auto"]:
             raise ValueError(f"Unknown vocoder type: {vocoder_type}")
         
+        def f0_from_lf0(lf0, vuv):
+            # gen_world_params と同じ計算
+            f0 = lf0.copy()
+            f0[np.nonzero(f0)] = np.exp(f0[np.nonzero(f0)])
+            f0[vuv < vuv_threshold] = 0
+            return f0.flatten()
+
         data,f0, spectrogram, aperiodicity, mel, vuv = None,None,None,None,None,None
         if self.multistream_features is not None and len(self.multistream_features) >= 4:
             mgc, lf0, vuv, bap = self.multistream_features
-            # Generate WORLD parameters
-            f0, spectrogram, aperiodicity = gen_world_params(
-                mgc, lf0, vuv, bap, self.config.sample_rate, vuv_threshold=vuv_threshold,use_world_codec=self.config.use_world_codec
-            )
+            if self.client_reads_world_params():
+                # Generate WORLD parameters
+                f0, spectrogram, aperiodicity = gen_world_params(
+                    mgc, lf0, vuv, bap, self.config.sample_rate, vuv_threshold=vuv_threshold,use_world_codec=self.config.use_world_codec
+                )
+            else:
+                # OpenUtau は synthe で合成するので sp/ap は読まない。1 フレーズで約 13MB あるので作らない
+                f0 = f0_from_lf0(lf0, vuv)
+                for path in (self.path_spectrogram_npy, self.path_aperiodicity_npy):
+                    if path is not None and exists(path):
+                        remove(path)
         elif self.multistream_features is not None and len(self.multistream_features) == 3:
             mel, lf0, vuv = self.multistream_features
-            f0 = lf0.copy()
-            f0[np.nonzero(f0)] = np.exp(f0[np.nonzero(f0)])
-            f0[vuv < 0.5] = 0
-            f0 = f0.flatten()
+            f0 = f0_from_lf0(lf0, vuv)
         else:
             data = self.predict_waveform(
                 multistream_features=self.multistream_features,
@@ -1232,6 +1322,11 @@ def diffusion_settings() -> dict:
     """
     if _diffusion_override is not None:
         return copy.deepcopy(_diffusion_override)
+    return _base_diffusion_settings()
+
+
+def _base_diffusion_settings() -> dict:
+    """config コマンドを除いた設定 (環境変数 > 既定値)。"""
     settings = _legacy_env_diffusion() or copy.deepcopy(DEFAULT_DIFFUSION)
     for k in DIFFUSION_STREAMS:
         spec = os.environ.get(f"ENUNU_DIFFUSION_{k.upper()}")
@@ -1249,12 +1344,17 @@ def set_diffusion_settings(request: dict) -> dict:
     request 例: {'steps': 25}  (mgc と mel のステップ数だけ変える)
                {'mgc': {'method': 'ddim', 'steps': 25}, 'bap': 'plms:20'}
                {'reset': True}  (環境変数・既定値に戻す)
+               {'reset': True, 'bap': {'steps': 30}}  (既定値から始めて bap だけ変える)
+
+    reset が無い指定は、今の設定に重ねる。OpenUtau は毎回 reset 付きで全体を送るので、
+    前に送った指定が残らない。
     """
     global _diffusion_override
-    if request.get('reset'):
+    reset = bool(request.get('reset'))
+    if reset and not any(k in request for k in ('steps', *DIFFUSION_STREAMS)):
         _diffusion_override = None
         return diffusion_settings()
-    settings = diffusion_settings()
+    settings = _base_diffusion_settings() if reset else diffusion_settings()
     if 'steps' in request:
         for k in ('mgc', 'mel'):
             settings[k]['steps'] = request['steps']
