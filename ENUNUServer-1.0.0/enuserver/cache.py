@@ -30,9 +30,10 @@ def features_meta(engine, kind, style_shift, digest, **extra):
     """キャッシュを作った条件。これが一致しなければキャッシュは使わない。"""
     # 拡散設定が変わったら (環境設定でステップ数を変えた等) キャッシュは使わない
     # postfilter: GV でパワーを保つようにする前のキャッシュ (ノイズが乗ることがある) を使わないため
+    # score_time: 楽譜の時刻を 96 分音符に丸めていた頃のキャッシュ (長いフレーズほど早まる) を使わないため
     return {'kind': kind, 'style_shift': style_shift, 'ust': digest,
             'feature_type': engine.feature_type, 'diffusion': diffusion.diffusion_settings(),
-            'postfilter': 'gv-energy', **extra}
+            'postfilter': 'gv-energy', 'score_time': 'exact-ticks', **extra}
 
 
 # features.npz ---------------------------------------------------------------

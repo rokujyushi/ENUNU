@@ -167,6 +167,15 @@ pip で入れたライブラリは書き換えず、import 時に関数を差し
   melf0 の音源では mel だけを渡します。48kHz・hop 240・mel 80 次元の乱数 generator で 10 秒を合成すると、
   GPU で 0.079 s（Wavehax 0.139 s）、CPU で 1.67 s（同 2.81 s）でした（決定的アルゴリズムの下でも遅くなりません）。
 
+### 楽譜ラベルの時刻（`enuserver/score_timing.py`）
+
+utaupy は UST のノート長を 96 分音符（20 tick）単位に丸め（`round(length / 20)`）、それを積み上げてラベルの時刻を決めます。
+OpenUtau は 1 音素を 1 ノートにして 16 tick や 109 tick のような長さで送るので、ノートごとに最大 ±10 tick の誤差が出て、
+フレーズの後ろほど声が楽譜より早くなっていました（115 音素のフレーズの最後で 53 ms、「と お い」の速い繰り返し 40 ノートで 183 ms）。
+- 音素の開始・終了時刻を UST の tick から丸めずに計算し直します（1 tick = 1250000 / tempo × 100ns）。
+- ノート長の文脈（e8、96 分音符単位）は学習時と同じ形にしたいので、丸めたまま残しています。
+- 丸めていた頃のキャッシュを使わないよう、`features_meta` に `score_time: exact-ticks` を入れています。
+
 ### NumPy 2 対応（`enuserver/nnsvs_compat.py`）
 
 Python 3.13 では NumPy 2 が必須です。nnsvs の `lowpass_filter` は `scipy.signal.butter` に要素1個のリストを渡していて、

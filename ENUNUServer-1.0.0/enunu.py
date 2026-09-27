@@ -85,7 +85,7 @@ from nnmnkwii.preprocessing.f0 import interp1d
 from nnsvs.base import PredictionType
 from nnsvs.gen import _midi_to_hz
 from sklearn.preprocessing import MinMaxScaler
-from enuserver import diffusion, nnsvs_compat, nnsvs_speedups, postfilter, wavehax
+from enuserver import diffusion, nnsvs_compat, nnsvs_speedups, postfilter, score_timing, wavehax
 from enuserver.nnsvs_compat import lowpass_filter
 # ↑EnunuServerCustom
 from enulib import enunu2nnsvs  # noqa: E402
@@ -94,6 +94,8 @@ from enulib import enunu2nnsvs  # noqa: E402
 # NumPy 2 で動かない nnsvs の関数を直した版にする / Wavehax ボコーダーを読めるようにする
 nnsvs_compat.apply()
 wavehax.apply()
+# 楽譜ラベルの時刻を、96 分音符に丸めたノート長ではなく UST の tick から計算する
+score_timing.apply()
 # nnsvs / nnmnkwii / pysptk の遅い部分を、結果を変えずに差し替える (ENUNU_NNSVS_SPEEDUPS=0 で無効)
 if os.environ.get('ENUNU_NNSVS_SPEEDUPS', '1') != '0':
     nnsvs_speedups.apply()

@@ -373,6 +373,30 @@ class TestEnergyPreservingGV(unittest.TestCase):
         self.check(lambda m: pyworld.decode_spectral_envelope(np.ascontiguousarray(m), 44100, 2048))
 
 
+class TestScoreTiming(unittest.TestCase):
+    """楽譜ラベルの時刻が、96 分音符に丸めず UST の tick どおりになること。"""
+
+    def test_times_follow_ust_ticks(self):
+        import enulib.utauplugin2score
+        from enuserver import score_timing
+        score_timing.apply()
+        # OpenUtau と同じく 1 音素 = 1 ノートで、20 tick で割り切れない長さを並べる
+        notes = [('t', 16, 60), ('o', 130, 60), ('o', 109, 60), ('i', 104, 60)] * 10
+        with tempfile.TemporaryDirectory() as work:
+            tmp = _common.write_tmp(os.path.join(work, 'enu.tmp'), work, notes, tempo=130)
+            table = os.path.join(work, 'empty.table')
+            open(table, 'w', encoding='utf-8').close()
+            full = os.path.join(work, 'score.full')
+            enulib.utauplugin2score.utauplugin2score(tmp, table, full)
+            with open(full, encoding='utf-8') as f:
+                starts = [int(line.split()[0]) for line in f]
+        lengths = [240] + [n[1] for n in notes] + [240]   # write_tmp が前後に付ける休符
+        expected = [round(sum(lengths[:i]) * 1250000 / 130) for i in range(len(lengths))]
+        self.assertEqual(len(starts), len(expected))
+        # 100ns 単位の四捨五入以外は一致する (丸めていた頃は最後で 40 ms 以上ずれた)
+        self.assertLessEqual(max(abs(a - b) for a, b in zip(starts, expected)), 1)
+
+
 class TestNnsvsCompat(unittest.TestCase):
     """nnsvs_compat の lowpass_filter が nnsvs の元の関数 (Wn をリストで渡す) と同じ結果を返すこと。"""
 
