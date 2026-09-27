@@ -1,14 +1,25 @@
+# Python 3.13 (組み込み版) 用。3.13 には NumPy 2 が必要 (nnsvs の NumPy 2 非対応箇所は enuserver/nnsvs_compat.py で直す)
+#
+# nnmnkwii / pysptk は 3.13 の Windows 用 wheel が無いのでソースからビルドする。
+#   - Visual Studio (C++ ビルドツール) が必要。Git Bash からだと VS が見つからないので PowerShell か cmd で実行する
+#   - 組み込み版にはヘッダーが無いので、同じバージョンの dev.msi を msiexec /a で展開し、
+#     include と libs を組み込み版のフォルダに一時的に置く (ビルド後に消してよい)
+#   - 組み込み版は pip のビルド分離が働かないので、先に numpy scipy cython "setuptools<81" wheel を入れ、
+#     --no-build-isolation で入れる
 # Install from PyPI
-numpy<2
 colored_traceback
 cython
 h5py
 hydra-core
 light-the-torch
 utaupy
-pyworld
+# 3.13 用の wheel があるのは 0.3.5 だけ
+pyworld==0.3.5
+# pysptk / pyworld / nnmnkwii が実行時に pkg_resources を使う (setuptools 81 で削除)
+setuptools<81
 pyyaml
 tqdm
+einops
 
 # Install from GitHub -----------------
 git+https://github.com/oatsu-gh/nnmnkwii@enunu-python312
@@ -16,3 +27,8 @@ git+https://github.com/oatsu-gh/nnsvs@enunu-python312
 git+https://github.com/oatsu-gh/HN-UnifiedSourceFilterGAN@enunu-python312
 git+https://github.com/oatsu-gh//ParallelWaveGAN@enunu-python312
 git+https://github.com/nnsvs/SiFiGAN
+
+# Wavehax ボコーダー (推論に要るのは torch / einops / librosa だけなので依存は入れない)
+#   python -m pip install --no-deps git+https://github.com/taroushirani/wavehax@28cbfad
+# 組み込み Python は setup.py の `from wavehax import __version__` が通らないので、
+# clone して setup.py のその行を __version__ = "0.0.1" に書き換えてから、そのフォルダを指定して入れる

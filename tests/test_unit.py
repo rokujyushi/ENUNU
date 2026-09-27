@@ -5,6 +5,7 @@ import sys
 import tempfile
 import types
 import unittest
+import warnings
 from unittest import mock
 
 import numpy as np
@@ -370,6 +371,102 @@ class TestEnergyPreservingGV(unittest.TestCase):
     def test_world_codec(self):
         import pyworld
         self.check(lambda m: pyworld.decode_spectral_envelope(np.ascontiguousarray(m), 44100, 2048))
+
+
+class TestNnsvsCompat(unittest.TestCase):
+    """nnsvs_compat の lowpass_filter が nnsvs の元の関数 (Wn をリストで渡す) と同じ結果を返すこと。"""
+
+    def test_lowpass_filter(self):
+        import nnsvs.dsp
+        import nnsvs.gen
+        import nnsvs.pitch
+        from scipy import signal
+        from enuserver import nnsvs_compat
+        nnsvs_compat.apply()
+        for module in (nnsvs.dsp, nnsvs.pitch, nnsvs.gen):
+            self.assertIs(module.lowpass_filter, nnsvs_compat.lowpass_filter)
+        x = np.random.default_rng(0).normal(size=300)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', DeprecationWarning)
+                b, a = signal.butter(5, [20 / 100], 'lowpass')   # 元の nnsvs と同じ呼び方 (NumPy 2 では TypeError)
+        except TypeError:
+            self.skipTest('NumPy 2 では元の呼び方ができない')
+        np.testing.assert_array_equal(nnsvs_compat.lowpass_filter(x, 200, cutoff=20), signal.filtfilt(b, a, x))
+        short = x[:10]
+        self.assertIs(nnsvs_compat.lowpass_filter(short, 200, cutoff=20), short)
+
+
+@unittest.skipUnless(__import__('importlib').util.find_spec('wavehax'), 'wavehax が必要')
+class TestWavehax(unittest.TestCase):
+    """Wavehax の読み込みと合成 (小さい乱数の generator で試す)。"""
+
+    STREAM_SIZES = [6, 1, 1, 1]   # 16kHz の WORLD の bap は1次元
+
+    def setUp(self):
+        from enuserver import wavehax
+        wavehax.apply()
+        wavehax._patch_stft()
+        self.wavehax = wavehax
+
+    def test_stft_inverse_same_as_original(self):
+        import torch
+        from wavehax.modules import STFT
+        rng = torch.Generator().manual_seed(0)
+        for n_fft, hop in ((960, 240), (64, 16), (100, 30)):   # 最後は割り切れないので元の実装を使う
+            stft = STFT(n_fft=n_fft, hop_length=hop)
+            real, imag = torch.randn(2, 2, n_fft // 2 + 1, 37, generator=rng).double()
+            stft.double()
+            torch.testing.assert_close(stft.inverse(real, imag),
+                                       self.wavehax._original_stft_inverse(stft, real, imag),
+                                       rtol=0, atol=1e-12)
+
+    def make_voice(self, work, use_continuous_f0=False):
+        import torch
+        from hydra.utils import instantiate
+        from omegaconf import OmegaConf
+        generator = {'_target_': 'wavehax.generators.WavehaxGenerator', 'in_channels': 7, 'channels': 4,
+                     'mult_channels': 2, 'kernel_size': 3, 'num_blocks': 1, 'n_fft': 320, 'hop_length': 80,
+                     'sample_rate': 16000, 'prior_type': 'pcph_closed_form'}
+        config = OmegaConf.create({'generator': generator, 'discriminator': {},
+                                   'data': {'feat_names': ['mcep', 'codeap'],
+                                            'use_continuous_f0': use_continuous_f0}})
+        OmegaConf.save(config, os.path.join(work, 'vocoder_model.yaml'))
+        net = instantiate(config.generator)
+        torch.save({'model': {'generator': net.state_dict()}}, os.path.join(work, 'vocoder_model.pth'))
+        dims = sum(self.STREAM_SIZES)
+        np.save(os.path.join(work, 'in_vocoder_scaler_mean.npy'), np.arange(dims, dtype=np.float64))
+        np.save(os.path.join(work, 'in_vocoder_scaler_var.npy'), np.ones(dims))
+        np.save(os.path.join(work, 'in_vocoder_scaler_scale.npy'), np.ones(dims))
+        return OmegaConf.create({'stream_sizes': self.STREAM_SIZES, 'has_dynamic_features': [False] * 4,
+                                 'num_windows': 1})
+
+    def test_load_and_synthesize(self):
+        import nnsvs.svs
+        import nnsvs.util
+        import torch
+        with tempfile.TemporaryDirectory() as work:
+            acoustic_config = self.make_voice(work)
+            self.assertIs(nnsvs.svs.load_vocoder, nnsvs.util.load_vocoder)
+            vocoder, scaler, _ = nnsvs.util.load_vocoder(os.path.join(work, 'vocoder_model.pth'), 'cpu',
+                                                         acoustic_config)
+        self.assertIsInstance(vocoder, self.wavehax.WavehaxWrapper)
+        # mgc (0〜5) と bap (8) だけを取り出す
+        np.testing.assert_array_equal(scaler.mean_, [0, 1, 2, 3, 4, 5, 8])
+        self.assertEqual(vocoder.f0_config.data.sine_f0_type, 'f0')
+
+        T = 20
+        rng = np.random.default_rng(0)
+        mgc = rng.normal(size=(T, 6))
+        lf0 = np.full((T, 1), np.log(200.0))
+        vuv = np.ones((T, 1))
+        bap = np.full((T, 1), -20.0)
+        engine = types.SimpleNamespace(device=torch.device('cpu'), vocoder=vocoder, vocoder_in_scaler=scaler,
+                                       sample_rate=16000, feature_type='world',
+                                       config=types.SimpleNamespace(frame_period=5, get=lambda k, d=None: d))
+        wav = self.wavehax.predict_waveform(engine, (mgc, lf0, vuv, bap))
+        self.assertEqual(wav.shape, (T * 80,))
+        self.assertTrue(np.all(np.isfinite(wav)))
 
 
 class TestEditAcousticReload(unittest.TestCase):

@@ -22,8 +22,7 @@ from enuserver import cache, diffusion
 try:
     import zmq
 except ModuleNotFoundError:
-    python_exe = os.path.join('.', 'python-3.12.10-embed-amd64', 'python.exe')
-    command = [python_exe, '-m', 'pip', 'install', 'pyzmq']
+    command = [sys.executable, '-m', 'pip', 'install', 'pyzmq']
     print('command:', command)
     subprocess.run(command, check=True)
     import zmq

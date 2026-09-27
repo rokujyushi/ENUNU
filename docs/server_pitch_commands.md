@@ -153,6 +153,23 @@ pip で入れたライブラリは書き換えず、import 時に関数を差し
 - 万一非有限値が出た場合は fp32 で合成し直します。`ENUNU_VOCODER_FP16=0` で無効にできます。
 - TF32 と cudnn.benchmark も試しましたが、効果はありませんでした。
 
+### Wavehax ボコーダー（`enuserver/wavehax.py`）
+
+`vocoder_model.yaml` の `generator._target_` が `wavehax.` で始まる音源は Wavehax で合成します
+（taroushirani/nnsvs の wavehax-support ブランチ相当。パッケージは taroushirani/wavehax@nnsvs）。
+- 特徴量の前処理（bap の補正と正規化）は uSFGAN と同じなので、nnsvs の uSFGAN の経路をそのまま使います。
+- F0 は学習設定 `data.use_continuous_f0` に合わせます。nnsvs のレシピの既定は `false`（無声区間の F0 を 0 にして学習）なので、
+  無声区間（vuv < 閾値）を 0 にして渡します。wavehax-support ブランチは常に連続 F0 を渡すので、ここだけ違います。
+- iSTFT の重ね合わせを加算に置き換えています。元の実装は単位行列カーネルの `conv_transpose1d` で、
+  `synthe` の決定的アルゴリズムの下では GPU で非常に遅くなります（2.5 秒の音声で 2.83 s → 0.055 s、結果は同じ）。
+- n_fft（48kHz で 960）が2のべき乗でなく GPU の半精度 FFT が使えないので、fp16 にはせず fp32 で動かします。
+
+### NumPy 2 対応（`enuserver/nnsvs_compat.py`）
+
+Python 3.13 では NumPy 2 が必須です。nnsvs の `lowpass_filter` は `scipy.signal.butter` に要素1個のリストを渡していて、
+NumPy 2 + SciPy 1.18 では TypeError になる（trajectory_smoothing で必ず通る）ので、スカラーで渡す版に差し替えます。
+NumPy 1.26 でも結果は同じです。
+
 ### 拡張機能の実行
 
 Python の拡張機能（`.py`）は、プロセス起動のコストを省くため、サーバーと同じプロセス内で実行します

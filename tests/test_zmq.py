@@ -82,7 +82,7 @@ class TestZmqProtocol(unittest.TestCase):
         result = res['result']
         # OpenUtau は name があれば 15556 のサーバーとみなす。version 2 は新しいクライアント専用
         self.assertEqual((result['name'], result['version'], result['author']),
-                         ('SimpleENUNUServer', '2.0.0', 'roku10shi'))
+                         ('ENUNUServer', '2.0.0', 'roku10shi'))
         self.assertIn('config', result['features']['commands'])
         self.assertEqual(result['features']['diffusion']['mgc'], {'method': 'ddim', 'steps': 25})
 

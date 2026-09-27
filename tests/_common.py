@@ -1,7 +1,7 @@
 """テスト共通の設定とヘルパー。
 
 実行方法 (ENUNUServer-1.0.0 フォルダで):
-    python-3.12.10-embed-amd64\\python.exe -m unittest discover -s ..\\tests -v
+    python-3.13.15-embed-amd64\\python.exe -m unittest discover -s ..\\tests -v
 
 実モデルを使うテストは、音源フォルダが見つからなければスキップする。
 音源は環境変数 ENUNU_TEST_VOICES (; 区切り) で変更できる。
@@ -11,7 +11,8 @@ import sys
 
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER_DIR = os.path.join(REPO_DIR, 'ENUNUServer-1.0.0')
-PYTHON_EXE = os.path.join(SERVER_DIR, 'python-3.12.10-embed-amd64', 'python.exe')
+# テストを動かしている組み込み Python でサーバーも起動する
+PYTHON_EXE = sys.executable
 if SERVER_DIR not in sys.path:
     sys.path.insert(0, SERVER_DIR)
 

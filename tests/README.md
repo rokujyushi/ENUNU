@@ -4,7 +4,7 @@
 
 ```
 cd ENUNUServer-1.0.0
-python-3.12.10-embed-amd64\python.exe -m unittest discover -s ..\tests -v
+python-3.13.15-embed-amd64\python.exe -m unittest discover -s ..\tests -v
 ```
 
 一部だけ実行する場合は `-p test_unit.py` のようにファイルを指定するか、`-k editorf0` のように名前で絞り込みます。

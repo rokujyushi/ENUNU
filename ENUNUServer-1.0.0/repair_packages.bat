@@ -2,7 +2,7 @@
 
 nvcc -V
 
-@set python_exe=%~dp0\python-3.12.10-embed-amd64\python.exe
+@set python_exe=%~dp0\python-3.13.15-embed-amd64\python.exe
 %python_exe% -m pip uninstall torch torchaudio torchvision --quiet -y
 
 %python_exe% -m pip install --upgrade utaupy --no-warn-script-location --disable-pip-version-check

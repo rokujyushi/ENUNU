@@ -93,7 +93,7 @@ extensions:
 ## 開発環境
 
 - Windows 10
-- Python 3.12
+- Python 3.13
 - CUDA 13.0
 
 ## ENUNU向けUTAU音源フォルダの作り方
