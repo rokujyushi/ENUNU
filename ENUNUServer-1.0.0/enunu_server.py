@@ -33,7 +33,7 @@ def check():
     # name / author は旧クライアントも参照するので変えない。
     # クライアントは version ではなく features.commands で使えるコマンドを判断する。
     return{
-        'name': 'SimpleENUNUServer',
+        'name': 'ENUNUServer',
         'version': '2.0.0',
         'author': 'roku10shi',
         'features': {
