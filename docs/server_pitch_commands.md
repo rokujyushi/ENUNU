@@ -172,6 +172,8 @@ pip で入れたライブラリは書き換えず、import 時に関数を差し
 Python 3.13 では NumPy 2 が必須です。nnsvs の `lowpass_filter` は `scipy.signal.butter` に要素1個のリストを渡していて、
 NumPy 2 + SciPy 1.18 では TypeError になる（trajectory_smoothing で必ず通る）ので、スカラーで渡す版に差し替えます。
 NumPy 1.26 でも結果は同じです。
+nnsvs を taroushirani/nnsvs（fm-support、`642fdbc`）に切り替えた後は nnsvs 側で直っているので、この差し替えは結果を変えません
+（旧 oatsu-gh/nnsvs@enunu-python312 に戻したときのために残しています）。
 
 ### 拡張機能の実行
 

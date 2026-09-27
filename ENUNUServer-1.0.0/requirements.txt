@@ -1,4 +1,5 @@
-# Python 3.13 (組み込み版) 用。3.13 には NumPy 2 が必要 (nnsvs の NumPy 2 非対応箇所は enuserver/nnsvs_compat.py で直す)
+# Python 3.13 (組み込み版) 用。3.13 には NumPy 2 が必要
+# (nnsvs の NumPy 2 非対応箇所は taroushirani 版で直っている。enuserver/nnsvs_compat.py は旧 oatsu 版用で、今は結果を変えない)
 #
 # nnmnkwii / pysptk は 3.13 の Windows 用 wheel が無いのでソースからビルドする。
 #   - Visual Studio (C++ ビルドツール) が必要。Git Bash からだと VS が見つからないので PowerShell か cmd で実行する
@@ -23,10 +24,15 @@ einops
 
 # Install from GitHub -----------------
 git+https://github.com/oatsu-gh/nnmnkwii@enunu-python312
-git+https://github.com/oatsu-gh/nnsvs@enunu-python312
 git+https://github.com/oatsu-gh/HN-UnifiedSourceFilterGAN@enunu-python312
 git+https://github.com/oatsu-gh//ParallelWaveGAN@enunu-python312
 git+https://github.com/nnsvs/SiFiGAN
+
+# nnsvs は taroushirani/nnsvs の fm-support ブランチ (Python 3.13 対応 + Flow Matching の nnsvs.techsinger)。
+# 旧 oatsu-gh/nnsvs@enunu-python312 と、手元の全音源で合成結果が一致することを確認済み (2026-09-28)。
+#   python -m pip install --no-deps git+https://github.com/taroushirani/nnsvs@642fdbc
+# Windows では recipes 以下のファイル名が長すぎて git clone が失敗するので、先に
+# git config --global core.longpaths true を設定するか、nnsvs/ と setup.py だけ取り出したフォルダを指定して入れる
 
 # Wavehax ボコーダー (推論に要るのは torch / einops / librosa だけなので依存は入れない)
 #   python -m pip install --no-deps git+https://github.com/taroushirani/wavehax@28cbfad
