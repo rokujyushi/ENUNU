@@ -2,6 +2,7 @@
 
 nnsvs の load_vocoder を包み、vocoder_model.yaml の generator が wavehax.* なら Wavehax として読む。
 wavehax パッケージ (taroushirani/wavehax@nnsvs) は Wavehax の音源を読むときだけ使う。
+MS-Wavehax (wavehax.generators.MultiScaleWavehaxGenerator) も inference(cond, f0) が同じなので同じ経路で読める。
 
 合成には nnsvs.gen.predict_waveform の uSFGAN 分岐をそのまま使う。特徴量の前処理 (bap の補正と正規化) が
 同じで、違うのは F0 の渡し方だけなので、学習時の設定 (data.use_continuous_f0) から F0 の種類を決めて渡す。

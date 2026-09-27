@@ -163,6 +163,9 @@ pip で入れたライブラリは書き換えず、import 時に関数を差し
 - iSTFT の重ね合わせを加算に置き換えています。元の実装は単位行列カーネルの `conv_transpose1d` で、
   `synthe` の決定的アルゴリズムの下では GPU で非常に遅くなります（2.5 秒の音声で 2.83 s → 0.055 s、結果は同じ）。
 - n_fft（48kHz で 960）が2のべき乗でなく GPU の半精度 FFT が使えないので、fp16 にはせず fp32 で動かします。
+- MS-Wavehax（`wavehax.generators.MultiScaleWavehaxGenerator`、Interspeech 2025）も同じ経路で読めます。
+  melf0 の音源では mel だけを渡します。48kHz・hop 240・mel 80 次元の乱数 generator で 10 秒を合成すると、
+  GPU で 0.079 s（Wavehax 0.139 s）、CPU で 1.67 s（同 2.81 s）でした（決定的アルゴリズムの下でも遅くなりません）。
 
 ### NumPy 2 対応（`enuserver/nnsvs_compat.py`）
 

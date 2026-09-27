@@ -421,25 +421,27 @@ class TestWavehax(unittest.TestCase):
                                        self.wavehax._original_stft_inverse(stft, real, imag),
                                        rtol=0, atol=1e-12)
 
-    def make_voice(self, work, use_continuous_f0=False):
+    def make_voice(self, work, use_continuous_f0=False, generator=None, feat_names=('mcep', 'codeap'),
+                   stream_sizes=STREAM_SIZES):
         import torch
         from hydra.utils import instantiate
         from omegaconf import OmegaConf
-        generator = {'_target_': 'wavehax.generators.WavehaxGenerator', 'in_channels': 7, 'channels': 4,
-                     'mult_channels': 2, 'kernel_size': 3, 'num_blocks': 1, 'n_fft': 320, 'hop_length': 80,
-                     'sample_rate': 16000, 'prior_type': 'pcph_closed_form'}
+        if generator is None:
+            generator = {'_target_': 'wavehax.generators.WavehaxGenerator', 'in_channels': 7, 'channels': 4,
+                         'mult_channels': 2, 'kernel_size': 3, 'num_blocks': 1, 'n_fft': 320, 'hop_length': 80,
+                         'sample_rate': 16000, 'prior_type': 'pcph_closed_form'}
         config = OmegaConf.create({'generator': generator, 'discriminator': {},
-                                   'data': {'feat_names': ['mcep', 'codeap'],
+                                   'data': {'feat_names': list(feat_names),
                                             'use_continuous_f0': use_continuous_f0}})
         OmegaConf.save(config, os.path.join(work, 'vocoder_model.yaml'))
         net = instantiate(config.generator)
         torch.save({'model': {'generator': net.state_dict()}}, os.path.join(work, 'vocoder_model.pth'))
-        dims = sum(self.STREAM_SIZES)
+        dims = sum(stream_sizes)
         np.save(os.path.join(work, 'in_vocoder_scaler_mean.npy'), np.arange(dims, dtype=np.float64))
         np.save(os.path.join(work, 'in_vocoder_scaler_var.npy'), np.ones(dims))
         np.save(os.path.join(work, 'in_vocoder_scaler_scale.npy'), np.ones(dims))
-        return OmegaConf.create({'stream_sizes': self.STREAM_SIZES, 'has_dynamic_features': [False] * 4,
-                                 'num_windows': 1})
+        return OmegaConf.create({'stream_sizes': list(stream_sizes),
+                                 'has_dynamic_features': [False] * len(stream_sizes), 'num_windows': 1})
 
     def test_load_and_synthesize(self):
         import nnsvs.svs
@@ -465,6 +467,35 @@ class TestWavehax(unittest.TestCase):
                                        sample_rate=16000, feature_type='world',
                                        config=types.SimpleNamespace(frame_period=5, get=lambda k, d=None: d))
         wav = self.wavehax.predict_waveform(engine, (mgc, lf0, vuv, bap))
+        self.assertEqual(wav.shape, (T * 80,))
+        self.assertTrue(np.all(np.isfinite(wav)))
+
+    def test_multi_stream_melf0(self):
+        """MS-Wavehax (MultiScaleWavehaxGenerator) を melf0 の音源で読んで合成する。"""
+        import nnsvs.util
+        import torch
+        generator = {'_target_': 'wavehax.generators.MultiScaleWavehaxGenerator', 'in_channels': 6,
+                     'channels': 4, 'mult_channels': 2, 'kernel_size': 3, 'num_blocks': 1,
+                     'decomposer': 'MultiStream1d', 'num_splits': 4, 'n_fft': 80, 'hop_length': 80,
+                     'sample_rate': 16000, 'prior_type': 'pcph_closed_form'}
+        with tempfile.TemporaryDirectory() as work:
+            acoustic_config = self.make_voice(work, use_continuous_f0=True, generator=generator,
+                                              feat_names=('mel',), stream_sizes=[6, 1, 1])
+            vocoder, scaler, _ = nnsvs.util.load_vocoder(os.path.join(work, 'vocoder_model.pth'), 'cpu',
+                                                         acoustic_config)
+        self.assertIsInstance(vocoder, self.wavehax.WavehaxWrapper)
+        # mel (0〜5) だけを取り出す
+        np.testing.assert_array_equal(scaler.mean_, [0, 1, 2, 3, 4, 5])
+        self.assertEqual(vocoder.f0_config.data.sine_f0_type, 'contf0')
+
+        T = 20
+        mel = np.random.default_rng(0).normal(size=(T, 6))
+        lf0 = np.full((T, 1), np.log(200.0))
+        vuv = np.ones((T, 1))
+        engine = types.SimpleNamespace(device=torch.device('cpu'), vocoder=vocoder, vocoder_in_scaler=scaler,
+                                       sample_rate=16000, feature_type='melf0',
+                                       config=types.SimpleNamespace(frame_period=5, get=lambda k, d=None: d))
+        wav = self.wavehax.predict_waveform(engine, (mel, lf0, vuv))
         self.assertEqual(wav.shape, (T * 80,))
         self.assertTrue(np.all(np.isfinite(wav)))
 
