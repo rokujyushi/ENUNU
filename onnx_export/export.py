@@ -48,7 +48,10 @@ def load_scalers(model_dir, stage):
 def model_config(config):
     """C# 側の後処理 (MLPG など) に必要な、モデルの設定を取り出す。"""
     keys = ('stream_sizes', 'has_dynamic_features', 'num_windows', 'stream_weights')
-    return {k: OmegaConf.to_container(config[k]) for k in keys if k in config}
+    return {
+        k: OmegaConf.to_container(config[k]) if OmegaConf.is_config(config[k]) else config[k]
+        for k in keys if k in config
+    }
 
 
 def export_model(model, in_dim, path, opset=OPSET):

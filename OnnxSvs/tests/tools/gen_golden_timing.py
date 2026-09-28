@@ -50,29 +50,35 @@ WEIGHT_SCALE = {'det': 2.0, 'mdn': 6.0}
 OUT_SCALE = {'timelag': (0.0, 3.0), 'duration': (12.0, 5.0)}
 
 
-def write_model(model_dir, stage, target, params, in_dim, seed, weight_scale):
+def write_model(model_dir, stage, target, params, in_dim, seed, weight_scale,
+                out_dim=1, extra_config=None, out_mean=None, out_scale=None):
+    """ランダムな重みのモデルと scaler を、パック済みモデルフォルダの形で書く。"""
     cls = getattr(__import__(target.rsplit('.', 1)[0], fromlist=['x']), target.rsplit('.', 1)[1])
-    kwargs = dict(in_dim=in_dim, out_dim=1, **params)
+    kwargs = dict(in_dim=in_dim, out_dim=out_dim, **params)
     torch.manual_seed(seed)
     model = cls(**kwargs).eval()
     with torch.no_grad():  # 初期値のままだと出力がほぼ一定になり、テストの意味が薄いので重みを大きくする
         for param in model.parameters():
             param.mul_(weight_scale)
     torch.save({'state_dict': model.state_dict()}, model_dir / f'{stage}_model.pth')
+    config = {
+        'stream_sizes': [out_dim],
+        'has_dynamic_features': [False],
+        'netG': {'_target_': target, **kwargs},
+    }
+    config.update(extra_config or {})
     with open(model_dir / f'{stage}_model.yaml', 'w', encoding='utf-8') as f:
-        yaml.safe_dump({
-            'stream_sizes': [1],
-            'has_dynamic_features': [False],
-            'netG': {'_target_': target, **kwargs},
-        }, f)
+        yaml.safe_dump(config, f)
     # nnsvs のパック済みモデルの scaler は float32 (float64 だと nnsvs 自身がモデルに double を渡して失敗する)
     f32 = np.float32
+    if out_mean is None:
+        mean, scale = OUT_SCALE[stage]
+        out_mean, out_scale = np.full(out_dim, mean), np.full(out_dim, scale)
     np.save(model_dir / f'in_{stage}_scaler_min.npy', np.full(in_dim, -0.1, dtype=f32))
     np.save(model_dir / f'in_{stage}_scaler_scale.npy', np.full(in_dim, 0.02, dtype=f32))
-    mean, scale = OUT_SCALE[stage]
-    np.save(model_dir / f'out_{stage}_scaler_mean.npy', np.array([mean], dtype=f32))
-    np.save(model_dir / f'out_{stage}_scaler_scale.npy', np.array([scale], dtype=f32))
-    np.save(model_dir / f'out_{stage}_scaler_var.npy', np.array([scale ** 2], dtype=f32))
+    np.save(model_dir / f'out_{stage}_scaler_mean.npy', np.asarray(out_mean, dtype=f32))
+    np.save(model_dir / f'out_{stage}_scaler_scale.npy', np.asarray(out_scale, dtype=f32))
+    np.save(model_dir / f'out_{stage}_scaler_var.npy', np.asarray(out_scale, dtype=f32) ** 2)
 
 
 def scalers(model_dir, stage):
