@@ -1,0 +1,33 @@
+# 移植元
+
+`src/OnnxSvs` の一部は、次の Python のコードを C# に移したものです。どちらも MIT License です。
+
+| C# | 移植元 |
+|---|---|
+| `QuestionSet` (質問ファイルの読み込み、`Wildcards2Regex`) | nnmnkwii `nnmnkwii/io/hts.py` の `load_question_set` / `wildcards2regex` |
+| `HtsLabel` (ラベルの読み込み、`Rounded`) | nnmnkwii `nnmnkwii/io/hts.py` の `HTSLabelFile.load` / `round_` |
+| `LinguisticFeatures` (言語特徴量、コーステコーディング) | nnmnkwii `nnmnkwii/frontend/merlin.py` |
+| `Scaler` (MinMax / Standard) | NNSVS `nnsvs/util.py` の `MinMaxScaler` / `StandardScaler` |
+
+- nnmnkwii: https://github.com/r9y9/nnmnkwii (Copyright (c) 2017 Ryuichi Yamamoto)
+- NNSVS: https://github.com/nnsvs/nnsvs (Copyright (c) 2020 Ryuichi Yamamoto)
+
+## テストデータ
+
+`tests/OnnxSvs.Tests/data` には次のデータが入っています。
+
+- `jp_qst001_nnsvs.hed`、`jp_dev_latest.hed`: NNSVS のレシピ (MIT License) のもの
+- `sample_full.lab`: NNSVS のテスト用ラベル `tests/data/nitech_jp_song070_f001_004.lab` の先頭 40 行。
+  元は Nagoya Institute of Technology の日本語歌声データベース "NIT SONG070 F001" で、
+  **Creative Commons Attribution 3.0** のライセンスです。
+  Copyright (c) 2004-2015 Nagoya Institute of Technology, Department of Computer Science
+  (released by HTS Working Group, http://hts.sp.nitech.ac.jp/)。
+  ラベルの一部を切り出して使っています。
+- `golden_frontend.json`: 上の 2 つから nnmnkwii で計算した特徴量。`sample_full.lab` の派生物なので、同じく CC BY 3.0 の表示が必要です。
+
+## 実行時に参照するパッケージ (NuGet)
+
+- Microsoft.ML.OnnxRuntime: MIT License (リポジトリには含めず、ビルド時に取得)
+- テストのみ: xunit、xunit.runner.visualstudio (Apache-2.0)、Microsoft.NET.Test.Sdk (MIT)
+
+移植は Python のソースを読んで行い、OpenUtau の C# 実装 (`EnunuOnnx`) のコードは使っていません。
