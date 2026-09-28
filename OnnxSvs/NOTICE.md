@@ -8,6 +8,7 @@
 | `HtsLabel` (ラベルの読み込み、`Rounded`) | nnmnkwii `nnmnkwii/io/hts.py` の `HTSLabelFile.load` / `round_` |
 | `LinguisticFeatures` (言語特徴量、コーステコーディング) | nnmnkwii `nnmnkwii/frontend/merlin.py` |
 | `Scaler` (MinMax / Standard) | NNSVS `nnsvs/util.py` の `MinMaxScaler` / `StandardScaler` |
+| `TimingPredictor`、`Conditioning` (time-lag / 音素長の予測、音高の加工、音素長の決定) | NNSVS `nnsvs/gen.py` の `predict_timelag` / `predict_duration` / `postprocess_duration`、`nnsvs/io/hts.py` の `get_note_indices` / `get_pitch_indices`、nnmnkwii `preprocessing/f0.py` の `interp1d` |
 
 - nnmnkwii: https://github.com/r9y9/nnmnkwii (Copyright (c) 2017 Ryuichi Yamamoto)
 - NNSVS: https://github.com/nnsvs/nnsvs (Copyright (c) 2020 Ryuichi Yamamoto)
@@ -17,6 +18,8 @@
 `tests/OnnxSvs.Tests/data` には次のデータが入っています。
 
 - `jp_qst001_nnsvs.hed`、`jp_dev_latest.hed`: NNSVS のレシピ (MIT License) のもの
+- `sample_score.lab`: 下の `sample_full.lab` から、音符ごとに時刻をそろえて作ったもの (同じく CC BY 3.0)
+- `timing_models/`、`golden_timing.json`: ランダムな重みのモデルと、それを nnsvs で動かした結果 (元データを含まない。ラベルは `sample_score.lab` から)
 - `sample_full.lab`: NNSVS のテスト用ラベル `tests/data/nitech_jp_song070_f001_004.lab` の先頭 40 行。
   元は Nagoya Institute of Technology の日本語歌声データベース "NIT SONG070 F001" で、
   **Creative Commons Attribution 3.0** のライセンスです。

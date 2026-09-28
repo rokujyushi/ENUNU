@@ -45,6 +45,12 @@ def load_scalers(model_dir, stage):
     return scalers
 
 
+def model_config(config):
+    """C# 側の後処理 (MLPG など) に必要な、モデルの設定を取り出す。"""
+    keys = ('stream_sizes', 'has_dynamic_features', 'num_windows', 'stream_weights')
+    return {k: OmegaConf.to_container(config[k]) for k in keys if k in config}
+
+
 def export_model(model, in_dim, path, opset=OPSET):
     """モデルを ONNX にして path に書く。書き出した入出力の情報を返す。
 
@@ -80,6 +86,7 @@ def export_dir(model_dir, out_dir, stages=STAGES):
             entry.update(export_model(model, config.netG.in_dim, out_dir / f'{stage}.onnx'))
             entry['file'] = f'{stage}.onnx'
             entry['scalers'] = load_scalers(model_dir, stage)
+            entry['model_config'] = model_config(config)
         except Exception as e:  # 未対応のモデルは理由を残して次の段に進む
             logger.warning('%s: 書き出せませんでした: %s', stage, e)
             entry['error'] = f'{type(e).__name__}: {e}'
