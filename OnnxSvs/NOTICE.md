@@ -9,6 +9,10 @@
 | `LinguisticFeatures` (言語特徴量、コーステコーディング) | nnmnkwii `nnmnkwii/frontend/merlin.py` |
 | `Scaler` (MinMax / Standard) | NNSVS `nnsvs/util.py` の `MinMaxScaler` / `StandardScaler` |
 | `TimingPredictor`、`Conditioning` (time-lag / 音素長の予測、音高の加工、音素長の決定) | NNSVS `nnsvs/gen.py` の `predict_timelag` / `predict_duration` / `postprocess_duration`、`nnsvs/io/hts.py` の `get_note_indices` / `get_pitch_indices`、nnmnkwii `preprocessing/f0.py` の `interp1d` |
+| `Mlpg` (MLPG、ストリームごとの MLPG) | nnmnkwii `nnmnkwii/paramgen/_mlpg.py` の `mlpg`、NNSVS `nnsvs/multistream.py` の `multi_stream_mlpg` |
+| `AcousticPredictor` (acoustic の推論) | NNSVS `nnsvs/gen.py` の `predict_acoustic` |
+| `AcousticPostprocess` (GV、vuv 補正、休符埋め、なめらか化) | NNSVS `nnsvs/gen.py` の `postprocess_acoustic` / `gen_spsvs_static_features` / `correct_vuv_by_phone` / `_get_nonrest_frame_soft_mask` / `_fill_silence_to_world_params`、`nnsvs/postfilters.py` の `variance_scaling`、`nnsvs/util.py` の `extract_static_scaler` |
+| `Dsp` (ローパスフィルタ) | NNSVS `nnsvs/dsp.py` の `lowpass_filter`。SciPy (BSD-3-Clause) の `signal.butter` / `filtfilt` / `lfilter_zi` と同じ手順を、ドキュメントとソースを読んで C# で書き直したもの |
 
 - nnmnkwii: https://github.com/r9y9/nnmnkwii (Copyright (c) 2017 Ryuichi Yamamoto)
 - NNSVS: https://github.com/nnsvs/nnsvs (Copyright (c) 2020 Ryuichi Yamamoto)
@@ -26,6 +30,7 @@
   Copyright (c) 2004-2015 Nagoya Institute of Technology, Department of Computer Science
   (released by HTS Working Group, http://hts.sp.nitech.ac.jp/)。
   ラベルの一部を切り出して使っています。
+- `acoustic_models/`、`golden_mlpg.json`、`golden_acoustic.json`、`golden_postprocess.json`: ランダムな重み・乱数の入力と、それを nnsvs / nnmnkwii で動かした結果。`golden_acoustic.json` と `golden_postprocess.json` は `sample_full.lab` のフレーム数・ラベルから作っており、同じく CC BY 3.0 の表示が必要です。
 - `golden_frontend.json`: 上の 2 つから nnmnkwii で計算した特徴量。`sample_full.lab` の派生物なので、同じく CC BY 3.0 の表示が必要です。
 
 ## 実行時に参照するパッケージ (NuGet)

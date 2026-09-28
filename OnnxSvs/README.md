@@ -8,7 +8,7 @@ Python を使わずに、HTS ラベルから音声を作るところまでを目
 | ラベル (`HtsLabel`)、質問ファイル (`QuestionSet`)、言語特徴量 (`LinguisticFeatures`)、scaler (`Scaler`) | 実装済み。nnmnkwii の出力と一致することをテスト済み |
 | ONNX 推論 (`ModelStage`)、timelag / duration の予測と音素長の決定 (`TimingPredictor`) | 実装済み。nnsvs の出力と一致することをテスト済み。動的特徴量 (MLPG) を使う timelag / duration は未対応 |
 | acoustic の ONNX 推論 (`AcousticPredictor`)、MLPG (`Mlpg`) | 実装済み。nnsvs / nnmnkwii の出力と一致することをテスト済み (MDN と決定的モデル、f0 シフトあり・なし) |
-| 後処理 (GV / post-filter、vuv 補正、休符埋め) | 未実装 |
+| acoustic の後処理 (`AcousticPostprocess`、`Dsp`): GV、ストリーム分割、vuv 補正、相対 f0、休符埋め、軌跡のなめらか化 | 実装済み (WORLD の 4 ストリームのみ)。nnsvs の出力と一致することをテスト済み。merlin / 学習済み post-filter、ビブラートは未対応 |
 | WORLD による合成 | 未実装 |
 
 ## テスト
@@ -22,4 +22,5 @@ dotnet test
 `golden_timing.json` と `timing_models/` (ランダムな重みの小さなモデルを onnx_export で書き出したもの) は
 `python tests/tools/gen_golden_timing.py` で作り直します。
 `golden_mlpg.json`、`golden_acoustic.json`、`acoustic_models/` は `python tests/tools/gen_golden_acoustic.py` で作り直します。
+`golden_postprocess.json` は `python tests/tools/gen_golden_postprocess.py` で作り直します (入力は乱数の音響特徴)。
 テスト用の `.hed` とラベルは NNSVS のもの (MIT) です。
