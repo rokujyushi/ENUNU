@@ -53,7 +53,11 @@ def make_model_dir(tmp_path, target, params, out_dim, stage='timelag'):
     model = cls(**kwargs).eval()
     torch.save({'state_dict': model.state_dict()}, tmp_path / f'{stage}_model.pth')
     with open(tmp_path / f'{stage}_model.yaml', 'w', encoding='utf-8') as f:
-        yaml.safe_dump({'netG': {'_target_': target, **kwargs}}, f)
+        yaml.safe_dump({
+            'stream_sizes': [out_dim],
+            'has_dynamic_features': [False],
+            'netG': {'_target_': target, **kwargs},
+        }, f)
     rng = np.random.default_rng(0)
     np.save(tmp_path / f'in_{stage}_scaler_min.npy', rng.normal(size=IN_DIM))
     np.save(tmp_path / f'in_{stage}_scaler_scale.npy', rng.uniform(0.5, 2, size=IN_DIM))
@@ -78,6 +82,7 @@ def test_onnx_matches_torch(tmp_path, name):
     entry = manifest['stages']['timelag']
     assert 'error' not in entry, entry.get('error')
     assert set(entry['scalers']) == {'in', 'out'}
+    assert entry['model_config']['stream_sizes'] == [out_dim]
 
     model, _ = load_model(model_dir, 'timelag')
     session = ort.InferenceSession(str(out_dir / entry['file']))

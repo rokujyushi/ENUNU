@@ -2,74 +2,85 @@ using System.Text.Json;
 
 namespace OnnxSvs;
 
-/// <summary>特徴量の正規化。nnsvs.util の MinMaxScaler / StandardScaler と同じ式。</summary>
+/// <summary>
+/// 特徴量の正規化。nnsvs.util の MinMaxScaler / StandardScaler と同じ式。
+/// nnsvs は scaler の値を float64 で持つので、計算は double で行う。
+/// </summary>
 public abstract class Scaler
 {
-    public abstract float Transform(float x, int dim);
-    public abstract float InverseTransform(float x, int dim);
+    public abstract double Transform(double x, int dim);
+    public abstract double InverseTransform(double x, int dim);
 
-    /// <summary>行ごとに変換した新しい配列を返す。</summary>
+    /// <summary>行ごとに変換する。結果は float (モデルに渡す値)。</summary>
     public float[][] Transform(float[][] rows)
-        => rows.Select(row => row.Select((x, d) => Transform(x, d)).ToArray()).ToArray();
+        => rows.Select(row => row.Select((x, d) => (float)Transform(x, d)).ToArray()).ToArray();
 
-    public float[][] InverseTransform(float[][] rows)
+    /// <summary>行ごとに逆変換する。結果は double のまま返す。</summary>
+    public double[][] InverseTransform(float[][] rows)
         => rows.Select(row => row.Select((x, d) => InverseTransform(x, d)).ToArray()).ToArray();
 }
 
-/// <summary>x * scale + min</summary>
+/// <summary>x * scale + min。feature_range は nnsvs の既定の (0, 1)。</summary>
 public sealed class MinMaxScaler : Scaler
 {
-    private readonly float[] _min;
-    private readonly float[] _scale;
+    public const double FeatureRangeMin = 0;
+    public const double FeatureRangeMax = 1;
 
-    public MinMaxScaler(float[] min, float[] scale)
+    public double[] Min { get; }
+    public double[] Scale { get; }
+
+    public MinMaxScaler(double[] min, double[] scale)
     {
-        _min = min;
-        _scale = scale;
+        Min = min;
+        Scale = scale;
     }
 
-    public override float Transform(float x, int dim) => _scale[dim] * x + _min[dim];
-    public override float InverseTransform(float x, int dim) => (x - _min[dim]) / _scale[dim];
+    public override double Transform(double x, int dim) => Scale[dim] * x + Min[dim];
+    public override double InverseTransform(double x, int dim) => (x - Min[dim]) / Scale[dim];
 }
 
-/// <summary>(x - mean) / scale</summary>
+/// <summary>(x - mean) / scale。Var は MDN の分散の戻しに使う。</summary>
 public sealed class StandardScaler : Scaler
 {
-    private readonly float[] _mean;
-    private readonly float[] _scale;
+    public double[] Mean { get; }
+    public double[] Var { get; }
+    public double[] Scale { get; }
 
-    public StandardScaler(float[] mean, float[] scale)
+    public StandardScaler(double[] mean, double[] var, double[] scale)
     {
-        _mean = mean;
-        _scale = scale;
+        Mean = mean;
+        Var = var;
+        Scale = scale;
     }
 
-    public float[] Mean => _mean;
-    public float[] Scale => _scale;
-
-    public override float Transform(float x, int dim) => (x - _mean[dim]) / _scale[dim];
-    public override float InverseTransform(float x, int dim) => x * _scale[dim] + _mean[dim];
+    public override double Transform(double x, int dim) => (x - Mean[dim]) / Scale[dim];
+    public override double InverseTransform(double x, int dim) => x * Scale[dim] + Mean[dim];
 }
 
 /// <summary>onnx_export の manifest.json から scaler を読む。</summary>
 public static class ScalerLoader
 {
-    public static (Scaler? In, Scaler? Out) Load(string manifestPath, string stage)
+    public static (Scaler? In, Scaler? Out) Load(JsonElement stageEntry)
     {
-        using var doc = JsonDocument.Parse(File.ReadAllText(manifestPath));
-        var scalers = doc.RootElement.GetProperty("stages").GetProperty(stage).GetProperty("scalers");
+        var scalers = stageEntry.GetProperty("scalers");
         Scaler? input = null, output = null;
         if (scalers.TryGetProperty("in", out var inEl))
         {
-            input = new MinMaxScaler(Floats(inEl, "min"), Floats(inEl, "scale"));
+            input = new MinMaxScaler(Doubles(inEl, "min"), Doubles(inEl, "scale"));
         }
         if (scalers.TryGetProperty("out", out var outEl))
         {
-            output = new StandardScaler(Floats(outEl, "mean"), Floats(outEl, "scale"));
+            output = new StandardScaler(Doubles(outEl, "mean"), Doubles(outEl, "var"), Doubles(outEl, "scale"));
         }
         return (input, output);
     }
 
-    private static float[] Floats(JsonElement parent, string name)
-        => parent.GetProperty(name).EnumerateArray().Select(e => (float)e.GetDouble()).ToArray();
+    public static (Scaler? In, Scaler? Out) Load(string manifestPath, string stage)
+    {
+        using var doc = JsonDocument.Parse(File.ReadAllText(manifestPath));
+        return Load(doc.RootElement.GetProperty("stages").GetProperty(stage));
+    }
+
+    private static double[] Doubles(JsonElement parent, string name)
+        => parent.GetProperty(name).EnumerateArray().Select(e => e.GetDouble()).ToArray();
 }
