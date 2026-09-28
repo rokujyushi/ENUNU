@@ -48,9 +48,20 @@ public static class Conditioning
     /// </summary>
     public static void ConditionPitchColumn(float[][] features, int column, double f0ShiftInCent = 0)
     {
-        var n = features.Length;
-        var f0 = new double[n];
-        for (var i = 0; i < n; i++)
+        var filled = ScoreLogF0(features, column);
+        // nnsvs は、補間したあとの log-f0 に cent 分のずれを足す
+        var offset = f0ShiftInCent != 0 ? f0ShiftInCent * Math.Log(2) / 1200 : 0;
+        for (var i = 0; i < features.Length; i++)
+        {
+            features[i][column] = (float)(filled[i] + offset);
+        }
+    }
+
+    /// <summary>楽譜の音高列 (MIDI ノート番号、0 は音高なし) を、補間した log-f0 にして返す。</summary>
+    public static double[] ScoreLogF0(float[][] features, int column)
+    {
+        var f0 = new double[features.Length];
+        for (var i = 0; i < f0.Length; i++)
         {
             var midi = features[i][column];
             if (midi > 0)
@@ -59,13 +70,7 @@ public static class Conditioning
                 f0[i] = Math.Log(440.0 * Math.Pow(2.0, (midi - 69.0) / 12.0));
             }
         }
-        var filled = Interp1d(f0);
-        // nnsvs は、補間したあとの log-f0 に cent 分のずれを足す
-        var offset = f0ShiftInCent != 0 ? f0ShiftInCent * Math.Log(2) / 1200 : 0;
-        for (var i = 0; i < n; i++)
-        {
-            features[i][column] = (float)(filled[i] + offset);
-        }
+        return Interp1d(f0);
     }
 
     /// <summary>nnmnkwii の interp1d。両端は最初/最後の有声値で埋め、間は線形補間。</summary>
