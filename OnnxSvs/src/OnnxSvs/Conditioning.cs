@@ -46,7 +46,7 @@ public static class Conditioning
     /// MIDI ノート番号の列を log-f0 にして、0 (音高なし) の区間を線形補間で埋める。
     /// _midi_to_hz(log_f0=True) と nnmnkwii.preprocessing.f0.interp1d(kind="slinear") と同じ。
     /// </summary>
-    public static void ConditionPitchColumn(float[][] features, int column)
+    public static void ConditionPitchColumn(float[][] features, int column, double f0ShiftInCent = 0)
     {
         var n = features.Length;
         var f0 = new double[n];
@@ -60,9 +60,11 @@ public static class Conditioning
             }
         }
         var filled = Interp1d(f0);
+        // nnsvs は、補間したあとの log-f0 に cent 分のずれを足す
+        var offset = f0ShiftInCent != 0 ? f0ShiftInCent * Math.Log(2) / 1200 : 0;
         for (var i = 0; i < n; i++)
         {
-            features[i][column] = (float)filled[i];
+            features[i][column] = (float)(filled[i] + offset);
         }
     }
 
@@ -101,13 +103,13 @@ public static class Conditioning
     /// features は書き換える。
     /// </summary>
     public static float[][] Prepare(float[][] features, ModelStage stage, int[] pitchIndices,
-        bool logF0Conditioning, bool forceClipInputFeatures)
+        bool logF0Conditioning, bool forceClipInputFeatures, double f0ShiftInCent = 0)
     {
         if (logF0Conditioning)
         {
             foreach (var idx in pitchIndices)
             {
-                ConditionPitchColumn(features, idx);
+                ConditionPitchColumn(features, idx, f0ShiftInCent);
             }
         }
         var x = stage.In.Transform(features);

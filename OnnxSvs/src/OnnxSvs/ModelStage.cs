@@ -11,7 +11,7 @@ public sealed record StageOutput(float[][] Y, float[][]? Sigma)
 }
 
 /// <summary>onnx_export の model_config (MLPG などに使う設定)。</summary>
-public sealed record ModelConfig(int[] StreamSizes, bool[] HasDynamicFeatures)
+public sealed record ModelConfig(int[] StreamSizes, bool[] HasDynamicFeatures, int NumWindows = 1)
 {
     public bool AnyDynamicFeatures => HasDynamicFeatures.Any(x => x);
 }
@@ -63,7 +63,8 @@ public sealed class ModelStage : IDisposable
         var cfg = entry.GetProperty("model_config");
         var config = new ModelConfig(
             cfg.GetProperty("stream_sizes").EnumerateArray().Select(e => e.GetInt32()).ToArray(),
-            cfg.GetProperty("has_dynamic_features").EnumerateArray().Select(e => e.GetBoolean()).ToArray());
+            cfg.GetProperty("has_dynamic_features").EnumerateArray().Select(e => e.GetBoolean()).ToArray(),
+            cfg.TryGetProperty("num_windows", out var nw) ? nw.GetInt32() : 1);
         var session = new InferenceSession(Path.Combine(onnxDir, entry.GetProperty("file").GetString()!));
         return new ModelStage(stage, session, outputs, entry.GetProperty("in_dim").GetInt32(),
             input, output, config);
