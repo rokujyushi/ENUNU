@@ -11,7 +11,10 @@
 | `TimingPredictor`、`Conditioning` (time-lag / 音素長の予測、音高の加工、音素長の決定) | NNSVS `nnsvs/gen.py` の `predict_timelag` / `predict_duration` / `postprocess_duration`、`nnsvs/io/hts.py` の `get_note_indices` / `get_pitch_indices`、nnmnkwii `preprocessing/f0.py` の `interp1d` |
 | `Mlpg` (MLPG、ストリームごとの MLPG) | nnmnkwii `nnmnkwii/paramgen/_mlpg.py` の `mlpg`、NNSVS `nnsvs/multistream.py` の `multi_stream_mlpg` |
 | `AcousticPredictor` (acoustic の推論) | NNSVS `nnsvs/gen.py` の `predict_acoustic` |
-| `AcousticPostprocess` (GV、vuv 補正、休符埋め、なめらか化) | NNSVS `nnsvs/gen.py` の `postprocess_acoustic` / `gen_spsvs_static_features` / `correct_vuv_by_phone` / `_get_nonrest_frame_soft_mask` / `_fill_silence_to_world_params`、`nnsvs/postfilters.py` の `variance_scaling`、`nnsvs/util.py` の `extract_static_scaler`、`nnsvs/pitch.py` の `gen_sine_vibrato` / `nonzero_segments` (`Vibrato`) |
+| `AcousticPostprocess` (GV、vuv 補正、休符埋め、なめらか化) | NNSVS `nnsvs/gen.py` の `postprocess_acoustic` / `gen_spsvs_static_features` / `correct_vuv_by_phone` / `_get_nonrest_frame_soft_mask` / `_fill_silence_to_world_params`、`nnsvs/postfilters.py` の `variance_scaling`、`nnsvs/util.py` の `extract_static_scaler` |
+| `Sptk` (mcepalpha、freqt、mc2sp) | pysptk `pysptk/util.py` の `mcepalpha`、`pysptk/conversion.py` の `mc2sp` (MIT License, Copyright (c) 2015 Ryuichi Yamamoto)。`freqt` は SPTK (Modified BSD License。著作権表示は SPTK の LICENSE を参照) の同名の関数と同じ式 (pysptk の出力との一致で確かめた) |
+| `WorldVocoder` (WORLD のパラメータ作り) | NNSVS `nnsvs/gen.py` の `gen_world_params`、pyworld の `get_cheaptrick_fft_size` (WORLD: BSD 3-Clause License、mmorise/World。著作権表示は WORLD の LICENSE を参照) |
+| `WorldlineNative` (P/Invoke の宣言) | OpenUtau `OpenUtau.Core/Render/Worldline.cs` の `DecodeMgc` / `DecodeBap` / `WorldSynthesis` の宣言 (MIT License, Copyright (c) 2014 StAkira)。ライブラリ本体は含めない |
 | `Dsp` (ローパスフィルタ) | NNSVS `nnsvs/dsp.py` の `lowpass_filter`。SciPy (BSD-3-Clause) の `signal.butter` / `filtfilt` / `lfilter_zi` と同じ手順を、ドキュメントとソースを読んで C# で書き直したもの |
 
 - nnmnkwii: https://github.com/r9y9/nnmnkwii (Copyright (c) 2017 Ryuichi Yamamoto)
