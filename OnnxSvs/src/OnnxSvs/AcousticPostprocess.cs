@@ -21,17 +21,34 @@ public sealed record PostprocessOptions
     public double F0ShiftInCent { get; init; } = 0;
     public bool ForceFixVuv { get; init; } = false;
     public bool FillSilenceToRest { get; init; } = false;
+    /// <summary>モデルが出すビブラートのストリーム (5・6 番目) を f0 に反映するときの深さの倍率。0 でビブラートなし。</summary>
+    public double VibratoScale { get; init; } = 1.0;
 
     public long FrameShift => (long)(FramePeriod * 1e4);
 }
 
 /// <summary>WORLD の特徴量。Lf0 と Vuv は 1 フレーム 1 値。</summary>
-public sealed record WorldParams(double[][] Mgc, double[] Lf0, double[] Vuv, double[][] Bap);
+public sealed record WorldParams(double[][] Mgc, double[] Lf0, double[] Vuv, double[][] Bap)
+{
+    /// <summary>
+    /// フレームごとの音高のずれ (cent) を log-f0 に足したものを返す。UST のビブラートなど、
+    /// 外で作った f0 の変化を後から重ねるための口。有声かどうかは Vuv で決まるので、無声の値も足してよい。
+    /// </summary>
+    public WorldParams WithF0DeltaCents(double[] deltaCents)
+    {
+        if (deltaCents.Length != Lf0.Length)
+        {
+            throw new ArgumentException($"長さがフレーム数 ({Lf0.Length}) と違います");
+        }
+        var lf0 = Lf0.Select((v, t) => v + deltaCents[t] * Math.Log(2) / 1200).ToArray();
+        return this with { Lf0 = lf0 };
+    }
+}
 
 /// <summary>
 /// nnsvs.gen.postprocess_acoustic (feature_type="world") を移したもの。GV、ストリームの分割、
 /// vuv の補正、f0 の組み立て、休符埋め、軌跡のなめらか化までを行う。
-/// merlin / 学習済みの post-filter、ビブラートのストリームは未対応。
+/// ビブラートのストリーム (差分方式・正弦波方式) に対応。merlin / 学習済みの post-filter は未対応。
 /// </summary>
 public static class AcousticPostprocess
 {
@@ -60,9 +77,9 @@ public static class AcousticPostprocess
         int[] staticStreamSizes, double[] staticVariance, PostprocessOptions? options = null)
     {
         options ??= new PostprocessOptions();
-        if (staticStreamSizes.Length != 4)
+        if (staticStreamSizes.Length is < 4 or > 6)
         {
-            throw new NotSupportedException("ビブラートのストリームには未対応です (mgc, lf0, vuv, bap の 4 つのみ)");
+            throw new NotSupportedException("ストリームは 4 つ (mgc, lf0, vuv, bap)、ビブラートの差分方式なら 5 つ、正弦波方式なら 6 つです");
         }
         var T = acoustic.Length;
         var features = LinguisticFeatures.FrameLevelCoarseCoding(labels, qs, options.FrameShift);
@@ -87,6 +104,12 @@ public static class AcousticPostprocess
         var vuv = x.Select(r => r[mgcDim + 1]).ToArray();
         var bap = x.Select(r => r[(mgcDim + 2)..(mgcDim + 2 + bapDim)]).ToArray();
 
+        var vibStart = mgcDim + 2 + bapDim;
+        double[][]? vib = staticStreamSizes.Length >= 5
+            ? x.Select(r => r[vibStart..(vibStart + staticStreamSizes[4])]).ToArray() : null;
+        double[]? vibFlags = staticStreamSizes.Length == 6
+            ? x.Select(r => r[vibStart + staticStreamSizes[4]]).ToArray() : null;
+
         if (options.ForceFixVuv)
         {
             vuv = CorrectVuvByPhone(vuv, qs, features);
@@ -99,6 +122,14 @@ public static class AcousticPostprocess
         {
             var lf0 = score != null ? target[t] + score[t] : target[t];
             f0[t] = vuv[t] < options.VuvThreshold || lf0 == 0 ? 0 : Math.Exp(lf0);
+        }
+        if (vib != null)
+        {
+            f0 = vibFlags != null
+                ? Vibrato.GenSineVibrato(f0, (int)(1 / (options.FramePeriod * 0.001)),
+                    vib.Select((r, t) => vibFlags[t] < 0.5 ? 0 : r[0]).ToArray(),
+                    vib.Select((r, t) => vibFlags[t] < 0.5 ? 0 : r[1]).ToArray(), options.VibratoScale)
+                : f0.Select((v, t) => v + options.VibratoScale * vib[t][0]).ToArray();
         }
         var lf0Filled = Conditioning.Interp1d(f0.Select(v => v != 0 ? Math.Log(v) : 0).ToArray());
 
