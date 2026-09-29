@@ -12,6 +12,8 @@ Python を使わずに、HTS ラベルから音声を作るところまでを目
 | WORLD のパラメータ作り (`WorldVocoder`、`Sptk`): メルケプストラム / メルケプストラム版 aperiodicity からのスペクトル、f0 と vuv、aperiodicity の補正 | 実装済み。pysptk / nnsvs の出力と一致することをテスト済み |
 | WORLD の codec と波形合成 (`IWorldCodec`、`IWorldSynthesizer`、`WorldlineNative`) | 口と、OpenUtau の Worldline (ネイティブライブラリ) を呼ぶ実装まで。**実物の Worldline での動作は未確認** (この環境にライブラリがない)。テストは偽物の実装での組み立てのみ |
 
+後処理のあとに、外で作った f0 の変化 (UST のビブラートなど) を重ねるときは `WorldParams.WithF0DeltaCents` を使います。
+
 ## テスト
 
 ```

@@ -31,6 +31,15 @@ CASES = {
                            vuv_threshold=0.3),
     # 相対 f0、GV なし、なめらか化なし
     'relative_plain': dict(relative_f0=True, post_filter_type='none', trajectory_smoothing=False),
+    # ビブラートのストリーム (正弦波方式: 6 ストリーム、差分方式: 5 ストリーム)
+    'vib_sine': dict(vibrato_scale=1.5, _input='sine'),
+    'vib_diff': dict(vibrato_scale=0.5, trajectory_smoothing=False, _input='diff'),
+}
+# 静的な次元 (mgc, lf0, vuv, bap, [vib, vib_flags]) と、動的特徴があるか
+LAYOUTS = {
+    'base': ([8, 1, 1, 2], [True, True, False, True]),
+    'diff': ([8, 1, 1, 2, 1], [True, True, False, True, True]),
+    'sine': ([8, 1, 1, 2, 2, 1], [True, True, False, True, True, False]),
 }
 
 
@@ -49,25 +58,54 @@ def make_features(rng, T):
     return np.round(feats, 5).astype(np.float32)
 
 
+def add_vibrato_streams(rng, base, T):
+    """base (T x 12) の後ろに、差分方式 (1 列)、正弦波方式 (振幅 cent、周波数 Hz、フラグ) のビブラートを足す。"""
+    on = np.zeros(T, dtype=bool)
+    for start, length in ((300, 160), (700, 220), (T - 120, 120)):  # 最後は末尾まで続く
+        on[start:start + length] = True
+        # ビブラートの区間とその先は有声にしておく (無声を挟むと、nnsvs のなめらか化で f0 が負になり log が NaN になる)
+        base[max(0, start - 10):start + length + 60, 9] = 1.0
+    m_a = np.where(on, rng.uniform(20, 170, size=T), 0.0)
+    m_f = np.where(on, rng.uniform(2, 9, size=T), 0.0)
+    flags = on.astype(float)
+    # 差分方式は f0 (Hz) にそのまま足すので、無声のフレームは 0 にしておく (nnsvs は無声でも足して、負の f0 に log をかける)
+    diff = np.sin(np.arange(T) / 6.0) * 6.0 * (base[:, 9] >= 0.5)
+    sine = np.concatenate([base, np.round(np.stack([m_a, m_f, flags], 1), 5)], 1).astype(np.float32)
+    diff = np.concatenate([base, np.round(diff[:, None], 5)], 1).astype(np.float32)
+    return {'base': base, 'diff': diff, 'sine': sine}
+
+
+def full_sizes(static, dynamic):
+    return [s * (NUM_WINDOWS if d else 1) for s, d in zip(static, dynamic)]
+
+
 def main():
     rng = np.random.default_rng(1)
     binary_dict, numeric_dict = hts.load_question_set(HED)
     labels = hts.load(LABEL).round_()
     T = int(labels.num_frames())
-    feats = make_features(rng, T)
-    static_var = np.round(rng.uniform(0.5, 2.0, size=feats.shape[1]), 5)
-    scaler = StandardScaler(np.zeros(feats.shape[1]), static_var, np.sqrt(static_var))
-    config = OmegaConf.create({'stream_sizes': STREAM_FULL, 'has_dynamic_features': HAS_DYNAMIC,
-                               'num_windows': NUM_WINDOWS})
+    inputs = add_vibrato_streams(rng, make_features(rng, T), T)
+    feats = inputs['base']
+    static_var = np.round(rng.uniform(0.5, 2.0, size=inputs['sine'].shape[1]), 5)
     rows = [int(r) for r in sorted(set(range(0, T, 11)) | {T - 1})]
-    golden = {'frames': T, 'features': feats.tolist(), 'static_var': static_var.tolist(),
-              'rows': rows, 'cases': {}}
+    golden = {'frames': T, 'static_var': static_var.tolist(), 'rows': rows,
+              'inputs': {'base': inputs['base'].tolist(),  # vib_* は base の後ろに足す列だけ
+                         'diff': inputs['diff'][:, 12:].tolist(), 'sine': inputs['sine'][:, 12:].tolist()},
+              'layouts': {k: v[0] for k, v in LAYOUTS.items()}, 'cases': {}}
     for name, kwargs in CASES.items():
+        kwargs = dict(kwargs)
+        layout = kwargs.pop('_input', 'base')
+        static, dynamic = LAYOUTS[layout]
+        feats = inputs[layout]
+        var = static_var[:feats.shape[1]]
+        scaler = StandardScaler(np.zeros(len(var)), var, np.sqrt(var))
+        config = OmegaConf.create({'stream_sizes': full_sizes(static, dynamic),
+                                   'has_dynamic_features': dynamic, 'num_windows': NUM_WINDOWS})
         mgc, lf0, vuv, bap = gen.postprocess_acoustic(
             'cpu', feats.copy(), labels, binary_dict, numeric_dict, config, scaler,
             sample_rate=48000, frame_period=5, feature_type='world', **{'post_filter_type': 'gv', **kwargs})
         golden['cases'][name] = {
-            'options': kwargs,
+            'options': kwargs, 'input': layout,
             'mgc': np.asarray(mgc, dtype=float)[rows].tolist(),
             'lf0': np.asarray(lf0, dtype=float)[rows, 0].tolist(),
             'vuv': np.asarray(vuv, dtype=float)[rows, 0].tolist(),

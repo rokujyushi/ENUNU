@@ -24,6 +24,8 @@ public class PostprocessGoldenTests
         {
             RelativeF0 = true, PostFilter = PostFilter.None, TrajectorySmoothing = false,
         },
+        "vib_sine" => new PostprocessOptions { VibratoScale = 1.5 },
+        "vib_diff" => new PostprocessOptions { VibratoScale = 0.5, TrajectorySmoothing = false },
         _ => throw new ArgumentException(name),
     };
 
@@ -31,6 +33,8 @@ public class PostprocessGoldenTests
     [InlineData("default")]
     [InlineData("fix_fill_shift")]
     [InlineData("relative_plain")]
+    [InlineData("vib_sine")]
+    [InlineData("vib_diff")]
     public void Postprocess_MatchesNnsvs(string name)
     {
         using var doc = JsonDocument.Parse(File.ReadAllText(Data("golden_postprocess.json")));
@@ -40,8 +44,18 @@ public class PostprocessGoldenTests
         var qs = QuestionSet.Load(Data("jp_qst001_nnsvs.hed"));
         var rows = g.GetProperty("rows").EnumerateArray().Select(x => x.GetInt32()).ToArray();
 
-        var result = AcousticPostprocess.Postprocess(Matrix(g.GetProperty("features")), labels, qs,
-            new[] { 8, 1, 1, 2 }, Vector(g.GetProperty("static_var")), Options(name));
+        // 入力は base (mgc, lf0, vuv, bap) の後ろに、ビブラートのストリームの列を足したもの
+        var layout = c.GetProperty("input").GetString()!;
+        var input = Matrix(g.GetProperty("inputs").GetProperty("base"));
+        if (layout != "base")
+        {
+            var extra = Matrix(g.GetProperty("inputs").GetProperty(layout));
+            input = input.Select((row, t) => row.Concat(extra[t]).ToArray()).ToArray();
+        }
+        var sizes = g.GetProperty("layouts").GetProperty(layout).EnumerateArray().Select(x => x.GetInt32()).ToArray();
+        var variance = Vector(g.GetProperty("static_var"))[..sizes.Sum()];
+
+        var result = AcousticPostprocess.Postprocess(input, labels, qs, sizes, variance, Options(name));
 
         Assert.Equal(g.GetProperty("frames").GetInt32(), result.Lf0.Length);
         var mgc = Matrix(c.GetProperty("mgc"));
@@ -62,5 +76,17 @@ public class PostprocessGoldenTests
             Assert.InRange(result.Lf0[t] - lf0[i], -1e-5, 1e-5);
             Assert.InRange(result.Vuv[t] - vuv[i], -1e-6, 1e-6);
         }
+    }
+}
+
+public class WorldParamsTests
+{
+    [Fact]
+    public void WithF0DeltaCents_ShiftsLog_F0ByCents()
+    {
+        var p = new WorldParams(new[] { new[] { 0.0 } }, new[] { Math.Log(200.0) }, new[] { 1.0 }, new[] { new[] { 0.0 } });
+        var shifted = p.WithF0DeltaCents(new[] { 1200.0 });
+        Assert.Equal(400.0, Math.Exp(shifted.Lf0[0]), 6);
+        Assert.Throws<ArgumentException>(() => p.WithF0DeltaCents(new[] { 1.0, 2.0 }));
     }
 }
