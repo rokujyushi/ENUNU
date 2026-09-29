@@ -11,7 +11,7 @@
 | `TimingPredictor`、`Conditioning` (time-lag / 音素長の予測、音高の加工、音素長の決定) | NNSVS `nnsvs/gen.py` の `predict_timelag` / `predict_duration` / `postprocess_duration`、`nnsvs/io/hts.py` の `get_note_indices` / `get_pitch_indices`、nnmnkwii `preprocessing/f0.py` の `interp1d` |
 | `Mlpg` (MLPG、ストリームごとの MLPG) | nnmnkwii `nnmnkwii/paramgen/_mlpg.py` の `mlpg`、NNSVS `nnsvs/multistream.py` の `multi_stream_mlpg` |
 | `AcousticPredictor` (acoustic の推論) | NNSVS `nnsvs/gen.py` の `predict_acoustic` |
-| `AcousticPostprocess` (GV、vuv 補正、休符埋め、なめらか化) | NNSVS `nnsvs/gen.py` の `postprocess_acoustic` / `gen_spsvs_static_features` / `correct_vuv_by_phone` / `_get_nonrest_frame_soft_mask` / `_fill_silence_to_world_params`、`nnsvs/postfilters.py` の `variance_scaling`、`nnsvs/util.py` の `extract_static_scaler` |
+| `AcousticPostprocess` (GV、vuv 補正、休符埋め、なめらか化) | NNSVS `nnsvs/gen.py` の `postprocess_acoustic` / `gen_spsvs_static_features` / `correct_vuv_by_phone` / `_get_nonrest_frame_soft_mask` / `_fill_silence_to_world_params`、`nnsvs/postfilters.py` の `variance_scaling`、`nnsvs/util.py` の `extract_static_scaler`、`nnsvs/pitch.py` の `gen_sine_vibrato` / `nonzero_segments` (`Vibrato`) |
 | `Dsp` (ローパスフィルタ) | NNSVS `nnsvs/dsp.py` の `lowpass_filter`。SciPy (BSD-3-Clause) の `signal.butter` / `filtfilt` / `lfilter_zi` と同じ手順を、ドキュメントとソースを読んで C# で書き直したもの |
 
 - nnmnkwii: https://github.com/r9y9/nnmnkwii (Copyright (c) 2017 Ryuichi Yamamoto)
