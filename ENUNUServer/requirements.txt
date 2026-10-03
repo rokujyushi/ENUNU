@@ -38,3 +38,6 @@ git+https://github.com/nnsvs/SiFiGAN
 #   python -m pip install --no-deps git+https://github.com/taroushirani/wavehax@28cbfad
 # 組み込み Python は setup.py の `from wavehax import __version__` が通らないので、
 # clone して setup.py のその行を __version__ = "0.0.1" に書き換えてから、そのフォルダを指定して入れる
+
+# NHVSing ボコーダー (melf0 の音源用。推論に要るのは torch / numpy / librosa / PyYAML だけなので依存は入れない)
+#   python -m pip install --no-deps git+https://github.com/rokujyushi/NHVSing@package

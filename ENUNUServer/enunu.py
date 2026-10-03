@@ -85,15 +85,16 @@ from nnmnkwii.preprocessing.f0 import interp1d
 from nnsvs.base import PredictionType
 from nnsvs.gen import _midi_to_hz
 from sklearn.preprocessing import MinMaxScaler
-from enuserver import diffusion, nnsvs_compat, nnsvs_speedups, postfilter, score_timing, wavehax
+from enuserver import diffusion, nhvsing, nnsvs_compat, nnsvs_speedups, postfilter, score_timing, wavehax
 from enuserver.nnsvs_compat import lowpass_filter
 # ↑EnunuServerCustom
 from enulib import enunu2nnsvs  # noqa: E402
 
 # ↓EnunuServerCustom
-# NumPy 2 で動かない nnsvs の関数を直した版にする / Wavehax ボコーダーを読めるようにする
+# NumPy 2 で動かない nnsvs の関数を直した版にする / Wavehax・NHVSing ボコーダーを読めるようにする
 nnsvs_compat.apply()
 wavehax.apply()
+nhvsing.apply()
 # 楽譜ラベルの時刻を、96 分音符に丸めたノート長ではなく UST の tick から計算する
 score_timing.apply()
 # nnsvs / nnmnkwii / pysptk の遅い部分を、結果を変えずに差し替える (ENUNU_NNSVS_SPEEDUPS=0 で無効)
@@ -836,11 +837,15 @@ class ENUNU(SPSVS):
                 np.save(path, array.astype(np.float64))
 
     def predict_waveform(self, multistream_features, vocoder_type='world', vuv_threshold=0.5):
-        """Wavehax は nnsvs が知らないので enuserver.wavehax で合成し、それ以外は nnsvs に任せる。"""
+        """Wavehax / NHVSing は nnsvs が知らないので enuserver で合成し、それ以外は nnsvs に任せる。"""
         if isinstance(self.vocoder, wavehax.WavehaxWrapper) and vocoder_type in ('auto', 'wavehax'):
             return wavehax.predict_waveform(self, multistream_features, vuv_threshold=vuv_threshold)
+        if isinstance(self.vocoder, nhvsing.NHVSingWrapper) and vocoder_type in ('auto', 'nhvsing'):
+            return nhvsing.predict_waveform(self, multistream_features, vuv_threshold=vuv_threshold)
         if vocoder_type == 'wavehax':
             raise ValueError('This voice does not have a Wavehax vocoder')
+        if vocoder_type == 'nhvsing':
+            raise ValueError('This voice does not have an NHVSing vocoder')
         return super().predict_waveform(multistream_features, vocoder_type=vocoder_type,
                                         vuv_threshold=vuv_threshold)
 
@@ -855,7 +860,7 @@ class ENUNU(SPSVS):
     ):
         """multistream_features からボコーダで波形を生成する。
         Args:
-            vocoder_type (str): Vocoder type. One of ``world``, ``pwg``, ``usfgan`` or ``wavehax``.
+            vocoder_type (str): Vocoder type. One of ``world``, ``pwg``, ``usfgan``, ``wavehax`` or ``nhvsing``.
                 If ``auto`` is specified, the vocoder is automatically selected.
             vuv_threshold (float): Threshold for VUV.
             dtype (np.dtype): Data type of the output waveform.
@@ -865,7 +870,7 @@ class ENUNU(SPSVS):
         """
         start_time = time.time()
         vocoder_type = vocoder_type.lower()
-        if vocoder_type not in ['world', 'pwg', 'usfgan', 'wavehax', 'auto']:
+        if vocoder_type not in ['world', 'pwg', 'usfgan', 'wavehax', 'nhvsing', 'auto']:
             raise ValueError(f'Unknown vocoder type: {vocoder_type}')
 
         # Generate waveform by vocoder
@@ -924,7 +929,7 @@ class ENUNU(SPSVS):
         """Synthesize waveform from HTS labels.
         Args:
             labels (nnmnkwii.io.hts.HTSLabelFile): HTS labels
-            vocoder_type (str): Vocoder type. One of ``world``, ``pwg``, ``usfgan`` or ``wavehax``.
+            vocoder_type (str): Vocoder type. One of ``world``, ``pwg``, ``usfgan``, ``wavehax`` or ``nhvsing``.
                 If ``auto`` is specified, the vocoder is automatically selected.
             post_filter_type (str): Post-filter type. ``merlin``, ``gv`` or ``nnsvs``
                 is supported.
@@ -944,7 +949,7 @@ class ENUNU(SPSVS):
         """
         start_time = time.time()
         vocoder_type = vocoder_type.lower()
-        if vocoder_type not in ['world', 'pwg', 'usfgan', 'wavehax', 'auto']:
+        if vocoder_type not in ['world', 'pwg', 'usfgan', 'wavehax', 'nhvsing', 'auto']:
             raise ValueError(f'Unknown vocoder type: {vocoder_type}')
         if post_filter_type not in ['merlin', 'nnsvs', 'gv', 'none']:
             raise ValueError(f'Unknown post-filter type: {post_filter_type}')

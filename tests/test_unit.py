@@ -524,6 +524,81 @@ class TestWavehax(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(wav)))
 
 
+@unittest.skipUnless(__import__('importlib').util.find_spec('nhvsing'), 'nhvsing が必要')
+class TestNHVSing(unittest.TestCase):
+    """NHVSing の読み込みと合成 (小さい乱数の generator で試す)。"""
+
+    def setUp(self):
+        from enuserver import nhvsing
+        nhvsing.apply()
+        self.nhvsing = nhvsing
+
+    def make_voice(self, work, num_mels=8, feature_type='melf0', sample_rate=16000, frame_period=5):
+        """export_nnsvs.py と同じ形の vocoder_model.pth / .yaml と、音源の config.yaml を作る。"""
+        import torch
+        from hydra.utils import instantiate
+        from omegaconf import OmegaConf
+        common = {'hop_size': 80, 'in_channels': 8, 'conv_channels': 8, 'kernel_size': 3, 'dilation_size': 1,
+                  'group_size': 4, 'use_causal': False}
+        generator = {'_target_': 'nhvsing.model.NHVSingV3',
+                     'vocoder_cfg': {**common, 'sample_rate': 16000, 'noise_std': 0.03, 'use_weight_norm': False,
+                                     'f0_upsample': 'linear', 'n_harmonic': 20},
+                     'ltv_filter_cfg': {**common, 'ccep_size': 32, 'ccep_size_noise': 32, 'fft_size': 256,
+                                        'n_ltv_layers': 1, 'use_quef_norm': True, 'quef_norm_alpha': 1.0,
+                                        'use_shared_trunk': True, 'use_hard_vuv': True, 'use_v3': True,
+                                        'ola_mode': 'hann'}}
+        config = OmegaConf.create({'generator': generator,
+                                   'data': {'feat_names': ['mel'], 'sample_rate': 16000, 'hop_size': 80,
+                                            'mel': {'num_mels': 8}}})
+        OmegaConf.save(config, os.path.join(work, 'vocoder_model.yaml'))
+        OmegaConf.save(OmegaConf.create({'feature_type': feature_type, 'sample_rate': sample_rate,
+                                         'frame_period': frame_period}), os.path.join(work, 'config.yaml'))
+        net = instantiate(config.generator)
+        torch.save({'model': {'generator': net.state_dict()}}, os.path.join(work, 'vocoder_model.pth'))
+        return OmegaConf.create({'stream_sizes': [num_mels, 1, 1], 'has_dynamic_features': [False] * 3,
+                                 'num_windows': 1})
+
+    def load(self, work, acoustic_config):
+        import nnsvs.util
+        return nnsvs.util.load_vocoder(os.path.join(work, 'vocoder_model.pth'), 'cpu', acoustic_config)
+
+    def test_load_and_synthesize(self):
+        import nnsvs.svs
+        import nnsvs.util
+        import torch
+        with tempfile.TemporaryDirectory() as work:
+            acoustic_config = self.make_voice(work)
+            self.assertIs(nnsvs.svs.load_vocoder, nnsvs.util.load_vocoder)
+            vocoder, scaler, _ = self.load(work, acoustic_config)
+        self.assertIsInstance(vocoder, self.nhvsing.NHVSingWrapper)
+        self.assertIsNone(scaler)   # mel は正規化せずに渡す
+
+        T = 20
+        mel = np.random.default_rng(0).normal(-3, 1, size=(T, 8))
+        lf0 = np.full((T, 1), np.log(200.0))
+        vuv = np.ones((T, 1))
+        vuv[T // 2:] = 0
+        engine = types.SimpleNamespace(device=torch.device('cpu'), vocoder=vocoder)
+        torch.manual_seed(1)
+        wav = self.nhvsing.predict_waveform(engine, (mel, lf0, vuv))
+        self.assertEqual(wav.shape, (T * 80,))
+        self.assertTrue(np.all(np.isfinite(wav)))
+        # 雑音は乱数なので、同じシードなら同じ波形になる (synthe はシードを固定してから合成する)
+        torch.manual_seed(1)
+        np.testing.assert_array_equal(self.nhvsing.predict_waveform(engine, (mel, lf0, vuv)), wav)
+
+    def test_incompatible_voice(self):
+        cases = (({'feature_type': 'world'}, 'melf0'),
+                 ({'num_mels': 80}, 'mel の次元'),
+                 ({'sample_rate': 48000}, 'サンプリング周波数'),
+                 ({'frame_period': 10}, 'hop'))
+        for kwargs, message in cases:
+            with self.subTest(**kwargs), tempfile.TemporaryDirectory() as work:
+                acoustic_config = self.make_voice(work, **kwargs)
+                with self.assertRaisesRegex(RuntimeError, message):
+                    self.load(work, acoustic_config)
+
+
 class TestEditAcousticReload(unittest.TestCase):
     """edit_acoustic: 拡張機能が書き換えなかった CSV は読み直さず、元の配列 (丸めなし) を使う。"""
 

@@ -13,11 +13,11 @@
 
 ## クライアントとの組み合わせ
 
-ENUNUServer 2 は、**最新の OpenUtau（`EnunuConnection` を持つクライアント）とセットで使います**。
-旧クライアント（SimpleENUNUServer / ENUNUServer 1 向けの OpenUtau）は `request[5]` を送らないので、このサーバーではエラーになります。
+ENUNUServer-2.x.x は、**最新の OpenUtau（`EnunuConnection` を持つクライアント）とセットで使います**。
+旧クライアント（SimpleENUNUServer / ENUNUServer-1.0.0 向けの OpenUtau）は `request[5]` を送らないので、このサーバーではエラーになります。
 旧クライアントを使う場合は、ENUNUServer 1 を使ってください。
 
-| | ENUNUServer 1 | ENUNUServer 2（このサーバー） |
+| | ENUNUServer-1.0.0 | ENUNUServer 2（このサーバー） |
 |---|---|---|
 | `ver_check` の `version` | `1.0.0` | `2.0.0` |
 | `request[5]` | 任意（style_shift） | 必須（style_shift） |
@@ -166,6 +166,24 @@ pip で入れたライブラリは書き換えず、import 時に関数を差し
 - MS-Wavehax（`wavehax.generators.MultiScaleWavehaxGenerator`、Interspeech 2025）も同じ経路で読めます。
   melf0 の音源では mel だけを渡します。48kHz・hop 240・mel 80 次元の乱数 generator で 10 秒を合成すると、
   GPU で 0.079 s（Wavehax 0.139 s）、CPU で 1.67 s（同 2.81 s）でした（決定的アルゴリズムの下でも遅くなりません）。
+
+### NHVSing ボコーダー（`enuserver/nhvsing.py`）
+
+`vocoder_model.yaml` の `generator._target_` が `nhvsing.` で始まる音源は NHVSing で合成します
+（パッケージは rokujyushi/NHVSing@package。学習と書き出しの手順は `nhvsing_nnsvs_plan.md` と `nhvsing_handoff.md`）。
+CPU で速い DSP ボコーダーで、GPU の無い環境での合成時間を縮めるのが狙いです。
+- melf0 の音源だけが対象です。nnsvs の MelF0 と同じ mel で学習してあるので、音響モデルが出した mel（正規化を外した log10）を
+  そのまま渡します（`in_vocoder_scaler` は使いません）。F0 は `exp(lf0)` の連続値、無声フラグは `vuv < 閾値` を 1 にして渡します。
+- 読み込み時に、音源の `config.yaml` の `feature_type` が `melf0` であること、音響モデルの mel の次元・サンプリング周波数・
+  フレーム周期が `vocoder_model.yaml` の `data`（`mel.num_mels` / `sample_rate` / `hop_size`）と合うことを確かめ、
+  合わなければエラーにします。fmin / fmax は照らし合わせられない（音源側に記録が無い）ので、nnsvs の既定値（30 / 24000）が前提です。
+- 雑音成分を `torch.normal` で CPU 上に作ります。`synthe` は合成の前に UST のハッシュからシードを固定しているので、
+  同じフレーズなら同じ波形になります（GPU / CPU どちらで動かしても同じ雑音）。
+- 学習も書き出し時の確認も fp32 なので、fp16 にはせず fp32 で動かします。
+- 最後の 1 hop（5 ms）は 0 までフェードアウトします（Hann 窓の重ね合わせで、最後のフレームだけ重なる相手が無いため。元の実装と同じ）。
+- 手元の melf0 音源（欲音ルコ melf0、KanadeShia MEL、雨星サイファ）で、7.5 秒のフレーズのボコーダー部分が
+  CPU 1 スレッドで RTF 0.15〜0.22、4 スレッドで 0.084〜0.086 でした。SiFiGAN の出力と比べて、F0 の差は中央値で ±1 cent 以内、
+  有声 / 無声の一致は 96〜100% です。
 
 ### 楽譜ラベルの時刻（`enuserver/score_timing.py`）
 
