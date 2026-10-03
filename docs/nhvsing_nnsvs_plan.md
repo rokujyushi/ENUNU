@@ -20,7 +20,7 @@ NHVSing は CPU で速い（元の README では ONNX で RTF 約 0.07、NSF-HiF
 - **ONNX ではなく PyTorch のチェックポイントで受け渡す。** ONNX で動くなら OpenUtau 側で直接動かせてしまい、サーバーで対応する意味が薄いため。
 - **mel を出す音源だけが対象。** WORLD（mgc/bap）の音源は対象外。
 - **Wavehax と同じ形にする。** Wavehax は taroushirani/wavehax のフォークを `pip install --no-deps git+...` で入れ、
-  `vocoder_model.yaml` の `generator._target_` でクラスを決めて `state_dict` を読んでいる（`ENUNUServer-1.0.0/enuserver/wavehax.py`）。
+  `vocoder_model.yaml` の `generator._target_` でクラスを決めて `state_dict` を読んでいる（`ENUNUServer/enuserver/wavehax.py`）。
   NHVSing もこれに揃える。
 - **mel の形式はフォーク側で nnsvs に合わせる。** サーバー側では mel を変換しない。
   配布済みの NHVSing の重み（128 次元 mel・44.1kHz 用、しかも非商用）は使えないので、一から学習する。
@@ -149,5 +149,5 @@ weight norm を外すこと、`data.mel` に学習時の mel 仕様をそのま�
 
 - NHVSing: https://github.com/wavtechyukky/NHVSing
 - NHV の元論文: Liu et al., "Neural Homomorphic Vocoder", Interspeech 2020
-- Wavehax の組み込み例: `ENUNUServer-1.0.0/enuserver/wavehax.py`、`docs/server_pitch_commands.md` の「Wavehax ボコーダー」
+- Wavehax の組み込み例: `ENUNUServer/enuserver/wavehax.py`、`docs/server_pitch_commands.md` の「Wavehax ボコーダー」
 - nnsvs の mel 計算: `parallel_wavegan/bin/preprocess.py` の `logmelfilterbank`、`nnsvs/bin/conf/prepare_features/acoustic/melf0_48k.yaml`

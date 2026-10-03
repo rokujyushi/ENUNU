@@ -1,9 +1,9 @@
 # ENUNUServer テスト
 
-`ENUNUServer-1.0.0` フォルダで、同梱の Python から実行します（pytest は不要）。
+`ENUNUServer` フォルダで、同梱の Python から実行します（pytest は不要）。
 
 ```
-cd ENUNUServer-1.0.0
+cd ENUNUServer
 python-3.13.15-embed-amd64\python.exe -m unittest discover -s ..\tests -v
 ```
 
